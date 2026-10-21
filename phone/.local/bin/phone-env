@@ -1,0 +1,3 @@
+# Sourced by every phone-* helper: puts rish on PATH and sets the id rish needs.
+export PATH="$HOME/.local/bin:$PREFIX/bin:$PATH"
+export RISH_APPLICATION_ID=com.termux

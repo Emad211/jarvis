@@ -5,6 +5,11 @@ description: Use when driving Android apps via Shizuku.
 
 # Android device control via Shizuku + rish (from Termux)
 
+Prefer the helpers on PATH (they set `RISH_APPLICATION_ID` themselves): `phone-ui [text]`
+(elements + tap centres; `--tap <text>` taps), `phone-tap X Y [ms]`, `phone-swipe`,
+`phone-key`, `phone-type` (Persian via clipboard), `phone-open <pkg>`, `phone-screenshot`,
+`phone-see "question"` (screenshot + vision model). The raw `rish` recipes below still apply.
+
 ## When to use
 The user wants you to operate the phone itself: open an app, navigate inside it, read what's on screen, tap, or take a screenshot. Prefer doing it directly over giving the user manual steps.
 

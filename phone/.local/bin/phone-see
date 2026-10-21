@@ -1,0 +1,81 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""Screenshot the phone and ask a vision model what is on it.
+
+Usage: phone-see ["question"]  (default: describe the screen)
+
+Tries, in order, every vision endpoint listed in VISION_CHAIN until one answers.
+Each entry is base_url|model|ENV_NAME_OF_KEY. Override with $PHONE_SEE_CHAIN
+(entries separated by commas). Keys are read from the environment or ~/.hermes/.env.
+"""
+import base64
+import json
+import os
+import subprocess
+import sys
+import urllib.request
+
+HOME = os.path.expanduser("~")
+VISION_CHAIN = os.environ.get("PHONE_SEE_CHAIN") or ",".join([
+    "https://generativelanguage.googleapis.com/v1beta/openai|gemini-2.5-flash|GEMINI_API_KEY",
+    "https://openrouter.ai/api/v1|google/gemma-3-27b-it:free|OPENROUTER_API_KEY",
+    "http://127.0.0.1:8790/v1|gemini-3.8-flash-low|ANTIGRAVITY_BRIDGE_KEY",
+])
+
+
+def env_value(name):
+    if os.environ.get(name):
+        return os.environ[name]
+    try:
+        with open(os.path.join(HOME, ".hermes", ".env"), encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith(name + "="):
+                    return line.split("=", 1)[1].strip().strip("\"'")
+    except OSError:
+        pass
+    return "antigravity-local" if name == "ANTIGRAVITY_BRIDGE_KEY" else ""
+
+
+def screenshot():
+    out = subprocess.run([os.path.join(HOME, ".local/bin/phone-screenshot"),
+                          os.path.join(HOME, "shots", "see.png")],
+                         capture_output=True, text=True, timeout=40).stdout
+    path = out.strip().rsplit("MEDIA:", 1)[-1]
+    with open(path, "rb") as fh:
+        return path, base64.b64encode(fh.read()).decode()
+
+
+def ask(base, model, key, question, b64):
+    body = {"model": model, "max_tokens": 1200, "messages": [{"role": "user", "content": [
+        {"type": "text", "text": question},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64," + b64}}]}]}
+    req = urllib.request.Request(base.rstrip("/") + "/chat/completions",
+                                 data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": "Bearer " + key})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        return json.loads(resp.read())["choices"][0]["message"]["content"]
+
+
+def main():
+    question = " ".join(sys.argv[1:]) or (
+        "Describe this phone screen precisely: app, visible text (keep Persian as-is), "
+        "buttons and their approximate positions on a 1080x2400 screen.")
+    path, b64 = screenshot()
+    errors = []
+    for entry in VISION_CHAIN.split(","):
+        base, model, key_env = entry.split("|")
+        key = env_value(key_env)
+        if not key:
+            errors.append(f"{model}: no {key_env}")
+            continue
+        try:
+            print(ask(base, model, key, question, b64).strip())
+            print(f"\n[{model} · MEDIA:{path}]")
+            return
+        except Exception as exc:  # noqa: BLE001 — try the next model
+            errors.append(f"{model}: {exc}")
+    sys.exit("all vision models failed:\n  " + "\n  ".join(errors))
+
+
+if __name__ == "__main__":
+    main()

@@ -16,11 +16,13 @@ model:
   aliases:
     dsflash: agentrouter/deepseek-v4-flash
     v4flash: agentrouter/deepseek-v4-flash
-  default: deepseek-v4-flash
+    free: openrouter/minimax/minimax-m3.1-flash:free
+    ultra: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
+  default: minimax/minimax-m3.1-flash:free
   default_headers:
     User-Agent: claude-cli/1.0.0 (external, cli)
-  provider: agentrouter
-  api_mode: anthropic_messages
+  provider: openrouter
+  api_mode: chat_completions
 onboarding:
   seen:
     busy_input_prompt: true
@@ -75,6 +77,28 @@ providers:
     - claude-opus-4-6-thinking
     - gpt-oss-120b-medium
     name: Google Antigravity
+  groq:
+    name: Groq
+    api: https://api.groq.com/openai/v1
+    key_env: GROQ_API_KEY
+    transport: chat_completions
+    models:
+    - openai/gpt-oss-120b
+    - moonshotai/kimi-k2-instruct
+  cerebras:
+    name: Cerebras
+    api: https://api.cerebras.ai/v1
+    key_env: CEREBRAS_API_KEY
+    transport: chat_completions
+    models:
+    - gpt-oss-120b
+  mistral:
+    name: Mistral
+    api: https://api.mistral.ai/v1
+    key_env: MISTRAL_API_KEY
+    transport: chat_completions
+    models:
+    - mistral-medium-latest
 quick_commands:
   flash:
     description: DeepSeek V4 Flash (AgentRouter)
@@ -102,3 +126,23 @@ display:
   streaming: true
   show_reasoning: false
   tool_progress: all
+delegation:
+  max_concurrent_children: 3
+credential_pool_strategies:
+  openrouter: round_robin
+  agentrouter: round_robin
+fallback_providers:
+- provider: openrouter
+  model: nvidia/nemotron-3-ultra-550b-a55b:free
+- provider: gemini
+  model: gemini-flash-latest
+- provider: groq
+  model: openai/gpt-oss-120b
+- provider: cerebras
+  model: gpt-oss-120b
+- provider: agentrouter
+  model: deepseek-v4-flash
+- provider: openrouter
+  model: openrouter/free
+- provider: antigravity
+  model: gemini-3.8-flash-high

@@ -1,0 +1,97 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Supervisor for the phone's Hermes stack. Every service runs in its own tmux session
+# inside a restart loop, so a crash comes back on its own in a few seconds.
+#
+#   hermes-svc start|stop|restart|status <name>
+#   hermes-svc boot          start everything (called by ~/.termux/boot/start.sh)
+#   hermes-svc list          one line per known service: name state
+#
+# Services: gwctl (control API :8777), agy (Antigravity bridge :8790),
+#           router (OmniRoute :20128, if installed), gw (default Hermes gateway),
+#           gw-<profile> (one gateway per Hermes profile that has its own bot token).
+#
+# Why tmux and not nohup: a nohup'd gateway launched from the boot shell can silently
+# never come up; tmux gives it a real session that outlives the launching shell.
+
+export PATH="$HOME/.local/bin:$PREFIX/bin:$PATH"
+export RISH_APPLICATION_ID=com.termux
+HERMES="$HOME/.hermes"
+VENV_PY="$PREFIX/lib/hermes-agent/app/venv/bin/python"
+[ -x "$VENV_PY" ] || VENV_PY="$PREFIX/bin/python3"
+LOGMAX=5000000
+
+profiles() {
+  [ -d "$HERMES/profiles" ] || return 0
+  for d in "$HERMES"/profiles/*/; do
+    [ -f "$d.env" ] && grep -q '^TELEGRAM_BOT_TOKEN=.' "$d.env" && basename "$d"
+  done
+}
+
+# Prints "<log file>|<command>" for a service name, or nothing if unknown.
+spec() {
+  case "$1" in
+    gwctl)  echo "$HERMES/gwctl.log|$VENV_PY $HOME/.local/bin/gwctl.py" ;;
+    agy)    [ -f "$HOME/agy_bridge.py" ] && echo "$HERMES/bridge.log|$VENV_PY $HOME/agy_bridge.py" ;;
+    router) command -v omniroute >/dev/null && echo "$HERMES/router.log|omniroute" ;;
+    gw)     [ -f "$HERMES/.env" ] && echo "$HERMES/gw-live.log|hermes gateway run --replace" ;;
+    gw-*)   p=${1#gw-}; [ -d "$HERMES/profiles/$p" ] && \
+              echo "$HERMES/profiles/$p/gw-live.log|hermes -p $p gateway run --replace" ;;
+  esac
+}
+
+running() { tmux has-session -t "=$1" 2>/dev/null; }
+
+start() {
+  s=$(spec "$1"); [ -n "$s" ] || { echo "$1: unknown or not installed"; return 1; }
+  running "$1" && { echo "$1: already running"; return 0; }
+  log=${s%%|*}; cmd=${s#*|}
+  mkdir -p "$(dirname "$log")"
+  [ -f "$log" ] && [ "$(wc -c < "$log")" -gt $LOGMAX ] && mv -f "$log" "$log.1"
+  tmux new-session -d -s "$1" -x 200 -y 50 \
+    "export PYTHONUNBUFFERED=1 RISH_APPLICATION_ID=com.termux; \
+     while :; do echo \"--- start \$(date '+%F %T')\" >> '$log'; $cmd >> '$log' 2>&1; \
+     echo \"--- exit \$? \$(date '+%F %T')\" >> '$log'; sleep 5; done"
+  echo "$1: started"
+}
+
+stop() {
+  running "$1" || { echo "$1: not running"; return 0; }
+  # Graceful: stop the restart loop, SIGTERM the service so it runs its exit path
+  # (the gateway records an unclean exit on a bare SIGHUP/SIGKILL), then drop the session.
+  pp=$(tmux list-panes -t "=$1" -F '#{pane_pid}' 2>/dev/null | head -1)
+  if [ -n "$pp" ]; then
+    kids=$(pgrep -P "$pp")
+    kill -TERM "$pp" 2>/dev/null
+    [ -n "$kids" ] && kill -TERM $kids 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      [ -z "$kids" ] || ! kill -0 $kids 2>/dev/null && break
+      sleep 1
+    done
+  fi
+  tmux kill-session -t "=$1" 2>/dev/null
+  echo "$1: stopped"
+}
+
+all() { echo gwctl agy router gw $(profiles | sed 's/^/gw-/'); }
+
+boot() {
+  termux-wake-lock
+  pgrep -x sshd >/dev/null || sshd
+  # adb over TCP is a runtime prop and resets on reboot; re-arm it so the PC can reconnect,
+  # then let the on-phone adb client use the loopback connection.
+  rish -c "setprop service.adb.tcp.port 5555; stop adbd; start adbd" >/dev/null 2>&1
+  sleep 2; adb connect 127.0.0.1:5555 >/dev/null 2>&1
+  # keep the control app's watchdog job from being deferred by Doze
+  rish -c "dumpsys deviceidle whitelist +com.termux +ir.emad.hermesctl" >/dev/null 2>&1
+  for s in $(all); do start "$s"; done   # gwctl first: the app is blind without it
+}
+
+case "$1" in
+  start|stop) [ -n "$2" ] || { echo "usage: hermes-svc $1 <name>"; exit 2; }; "$1" "$2" ;;
+  restart)    stop "$2"; start "$2" ;;
+  status)     running "$2" && echo "$2: running" || { echo "$2: stopped"; exit 1; } ;;
+  list)       for s in $(all); do [ -n "$(spec "$s")" ] || continue
+                running "$s" && echo "$s running" || echo "$s stopped"; done ;;
+  boot)       boot ;;
+  *)          sed -n '2,12p' "$0"; exit 2 ;;
+esac

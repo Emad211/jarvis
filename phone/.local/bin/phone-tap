@@ -1,2 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/sh
-$HOME/.local/bin/rish -c "input tap $1 $2"
+# Usage: phone-tap X Y            tap
+#        phone-tap X Y MS         long-press for MS milliseconds
+. "$HOME/.local/bin/phone-env"
+[ -n "$2" ] || { echo "usage: phone-tap X Y [hold_ms]" >&2; exit 2; }
+if [ -n "$3" ]; then rish -c "input swipe $1 $2 $1 $2 $3"; else rish -c "input tap $1 $2"; fi

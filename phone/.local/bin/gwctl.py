@@ -1,36 +1,42 @@
 #!/usr/bin/env python3
-"""gwctl v2 — full control server for the Hermes stack on this phone.
+"""gwctl v3 — control server for the Hermes stack on this phone.
 
-Loopback only (127.0.0.1:8777). The hcontrol app is the only client.
+Loopback only (127.0.0.1:8777); the Hermes Control app is the client. There is no
+auth token: the app cannot read Termux-private files to learn a secret, and only apps
+already on this phone can reach a loopback port.
 
-Endpoints
+Most endpoints accept ?profile=<name> (default profile when omitted).
+
     GET  /ping                     liveness
-    GET  /version                  server + hermes versions
-    GET  /status                   gateway health, telegram, model, uptime
-    GET  /system                   battery, memory, storage, load, processes
+    GET  /version                  gwctl + hermes versions
+    GET  /status                   gateway health, telegram, model, uptime, log tail
+    GET  /overview                 status of every profile + every service, in one call
+    GET  /system                   battery, memory, storage, load
+    GET  /services                 supervised services (hermes-svc) and their state
+    POST /services/action          {name, action: start|stop|restart}
+    GET  /profiles                 Hermes profiles with model + bot state
     GET  /config                   redacted config + editable field schema
-    POST /config/set               {key, value}  -> write config.yaml (backed up)
-    GET  /models                   configured providers/models + live model list
+    POST /config/set               {key, value}         (via `hermes config set`)
+    GET  /models                   configured + fallback chain + live model list
     POST /model/switch             {provider, model}
-    POST /model/test               {provider, model, prompt} -> latency + reply
-    GET  /keys                     credential pool, masked, with cooldowns
-    POST /keys/test                {provider, id?}  -> live check per key
-    POST /keys/reset               {provider}  -> clear cooldown/error state
-    POST /keys/add                 {provider, label, key}
+    POST /model/test               {provider, model, prompt}
+    GET  /fallback                 current fallback chain
+    POST /fallback/set             {chain: [{provider, model}, ...]}
+    GET  /keys                     credential pools (masked) + provider API-key slots
+    POST /keys/add                 {provider, label, key}   (pool, via `hermes auth add`)
     POST /keys/remove              {provider, id}
+    POST /keys/reset               {provider}
+    POST /keys/test                {provider, id?}
+    POST /env/set                  {name, value}   only *_API_KEY / *_TOKEN names
     GET  /logs?file=&lines=&filter=
-    GET  /logs/files               available log files
-    GET  /checks                   reachability of agentrouter/telegram/dns
+    GET  /logs/files
+    GET  /checks                   reachability: providers, telegram, VPN, bridge, router
     GET  /cron                     scheduled jobs
     POST /cron/action              {id, action: run|pause|resume}
-    POST /agent/test               end-to-end `hermes -z` round trip
-    POST /gateway/restart          start/restart the gateway
+    POST /agent/test               {prompt?}  end-to-end `hermes -z` round trip
+    POST /send                     {text, target?}  message via `hermes send` (no LLM)
+    POST /gateway/restart          restart this profile's gateway
     POST /gateway/stop             stop it
-
-Security: binds 127.0.0.1 only, so nothing off-device can reach it. There is
-deliberately no auth token — the app cannot read files inside Termux, so a shared
-secret would have to be pasted in by hand, and the only clients that can reach a
-loopback port are apps already running on this phone.
 """
 from __future__ import annotations
 
@@ -45,50 +51,60 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-try:
-    import yaml
-except Exception:  # noqa: BLE001
-    yaml = None
+import yaml  # gwctl runs under the Hermes venv, which ships PyYAML
 
 HOME = os.path.expanduser("~")
-HERMES = os.path.join(HOME, ".hermes")
-CFG = os.path.join(HERMES, "config.yaml")
-AUTH = os.path.join(HERMES, "auth.json")
-STATE = os.path.join(HERMES, "gateway_state.json")
-JOBS = os.path.join(HERMES, "cron", "jobs.json")
-BACKUPS = os.path.join(HERMES, "hcontrol-backups")
-GW_LOG = os.path.join(HERMES, "gw-live.log")
-PORT = int(os.environ.get("GWCTL_PORT", "8777"))
-
-TMUX_SESSION = "gw"
+ROOT = os.path.join(HOME, ".hermes")
 PREFIX = "/data/data/com.termux/files/usr"
 HERMES_BIN = os.path.join(PREFIX, "bin", "hermes")
-UA = "claude-cli/1.0.0 (external, cli)"
-API_VERSION = 2
+SVC = os.path.join(HOME, ".local", "bin", "hermes-svc")
+PORT = int(os.environ.get("GWCTL_PORT", "8777"))
+API_VERSION = 3
+VERSION = "3.0"
 
-CFG_LOCK = threading.Lock()
+ENV = dict(os.environ, RISH_APPLICATION_ID="com.termux",
+           PATH=f"{HOME}/.local/bin:{PREFIX}/bin:{os.environ.get('PATH', '')}")
+WRITE_LOCK = threading.Lock()
 
-_ENV = dict(os.environ)
-_ENV["PATH"] = f"{HOME}/.local/bin:{PREFIX}/bin:{_ENV.get('PATH', '')}"
+# Base URLs for providers that Hermes ships as built-ins (not listed under `providers:`).
+BUILTIN_BASES = {
+    "openrouter": "https://openrouter.ai/api/v1",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
+    "huggingface": "https://router.huggingface.co/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "deepinfra": "https://api.deepinfra.com/v1/openai",
+}
+# Env var that holds each provider's key (shown as "slots" in the app's Keys tab).
+KEY_SLOTS = [
+    ("gemini", "GEMINI_API_KEY", "https://aistudio.google.com/apikey"),
+    ("openrouter", "OPENROUTER_API_KEY", "https://openrouter.ai/keys"),
+    ("groq", "GROQ_API_KEY", "https://console.groq.com/keys"),
+    ("cerebras", "CEREBRAS_API_KEY", "https://cloud.cerebras.ai"),
+    ("nvidia", "NVIDIA_API_KEY", "https://build.nvidia.com"),
+    ("mistral", "MISTRAL_API_KEY", "https://console.mistral.ai/api-keys"),
+    ("github", "GITHUB_TOKEN", "https://github.com/settings/tokens"),
+    ("agentrouter", "AGENTROUTER_API_KEY", "https://agentrouter.org/console"),
+    ("elevenlabs", "ELEVENLABS_API_KEY", "https://elevenlabs.io/app/settings/api-keys"),
+]
 
 
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-def _run(cmd, timeout=25):
+def run(cmd, timeout=30):
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=_ENV)
-        return p.returncode, (p.stdout or "") + (p.stderr or "")
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=ENV)
+        return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
     except subprocess.TimeoutExpired:
         return 124, "timeout"
     except Exception as exc:  # noqa: BLE001
         return 1, str(exc)
 
 
-def _read_json(path):
+def read_json(path):
     try:
         with open(path, encoding="utf-8") as fh:
             return json.load(fh)
@@ -96,7 +112,7 @@ def _read_json(path):
         return {}
 
 
-def _read_text(path):
+def read_text(path):
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             return fh.read()
@@ -104,260 +120,35 @@ def _read_text(path):
         return ""
 
 
-def _mask(secret):
+def mask(secret):
     s = str(secret or "")
     if len(s) <= 10:
-        return "•" * len(s) if s else ""
+        return "•" * len(s)
     return f"{s[:6]}…{s[-4:]}"
 
 
-def _now():
+def now():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _pid_cmdline(pid):
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as fh:
-            return fh.read().decode("utf-8", "replace")
-    except Exception:  # noqa: BLE001
-        return ""
+def home_of(profile):
+    if not profile or profile == "default":
+        return ROOT
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", profile):
+        raise ValueError("bad profile name")
+    path = os.path.join(ROOT, "profiles", profile)
+    if not os.path.isdir(path):
+        raise ValueError(f"no profile '{profile}'")
+    return path
 
 
-def _pid_alive(pid):
-    cmd = _pid_cmdline(pid)
-    return "gateway" in cmd and "run" in cmd
+def hermes(profile, *args, timeout=60):
+    cmd = [HERMES_BIN] + (["-p", profile] if profile and profile != "default" else []) + list(args)
+    return run(cmd, timeout=timeout)
 
 
-def _pid_uptime(pid):
-    """Seconds a process has been alive.
-
-    Android blocks reading /proc/uptime and /proc/1/* from Termux, and
-    /proc/<pid>/stat's starttime needs /proc/uptime to convert. `ps -o etimes`
-    (procps-ng, shipped with Termux) answers it directly.
-    """
-    try:
-        out = subprocess.run(["ps", "-A", "-o", "pid,etimes", "--no-headers"],
-                             capture_output=True, text=True, timeout=8, env=_ENV).stdout
-        for line in out.splitlines():
-            parts = line.split()
-            if len(parts) >= 2 and parts[0] == str(pid):
-                return int(parts[1])
-    except Exception:  # noqa: BLE001
-        pass
-    # Fallback: directory ctime (creation time) — good enough for a floor value.
-    try:
-        return max(0, int(time.time() - os.stat(f"/proc/{pid}").st_ctime))
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _pid_rss(pid):
-    for line in _read_text(f"/proc/{pid}/status").splitlines():
-        if line.startswith("VmRSS:"):
-            try:
-                return int(line.split()[1])
-            except Exception:  # noqa: BLE001
-                return 0
-    return 0
-
-
-def _sys_uptime():
-    """System uptime in seconds.
-
-    Android blocks /proc/uptime and /proc/1 from Termux, and ro.boottime.init is
-    empty on this build. The oldest process's elapsed time is a good floor: the
-    first process spawned after boot has been alive essentially since then.
-    """
-    try:
-        return int(float(_read_text("/proc/uptime").split()[0]))
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        out = subprocess.run(["ps", "-A", "-o", "etimes", "--no-headers"],
-                             capture_output=True, text=True, timeout=8, env=_ENV).stdout
-        values = [int(x) for x in out.split() if x.isdigit()]
-        if values:
-            return max(values)
-    except Exception:  # noqa: BLE001
-        pass
-    return None
-
-
-# ---------------------------------------------------------------------------
-# gateway
-# ---------------------------------------------------------------------------
-def gateway_pids():
-    recorded = str(_read_json(STATE).get("pid") or "")
-    if recorded.isdigit() and _pid_alive(int(recorded)):
-        return [recorded]
-
-    found = []
-    try:
-        for entry in os.listdir("/proc"):
-            if not entry.isdigit():
-                continue
-            cmd = _pid_cmdline(entry)
-            # Reject tmux launchers and `bash -c … | tee` wrappers: they outlive the
-            # session and would make a dead gateway look alive.
-            if "gateway" in cmd and " run" in cmd and "tmux" not in cmd and "bash -c" not in cmd:
-                found.append(entry)
-    except Exception:  # noqa: BLE001
-        pass
-    return found
-
-
-def gateway_status():
-    pids = gateway_pids()
-    state = _read_json(STATE)
-    tg = (state.get("platforms") or {}).get("telegram") or {}
-    tg_state = tg.get("state") or "unknown"
-    attention = bool(tg.get("needs_attention"))
-
-    state_pid = str(state.get("pid") or "")
-    fresh = bool(state_pid) and state_pid in pids
-
-    if pids and fresh:
-        overall = "online"
-    elif pids:
-        overall = "starting"
-    else:
-        overall = "offline"
-
-    return {
-        "overall": overall,
-        "health": "ok" if overall == "online" and tg_state == "connected" else overall,
-        "pid": pids[0] if pids else None,
-        "pids": pids,
-        "telegram": tg_state,
-        "needs_attention": attention,
-        "state_fresh": fresh,
-        "model": _current_model(),
-        "version": state.get("code_version") or "",
-        "uptime_seconds": _pid_uptime(int(pids[0])) if pids else None,
-        "rss_kb": _pid_rss(int(pids[0])) if pids else 0,
-        "active_agents": state.get("active_agents") or 0,
-        "checked_at": _now(),
-    }
-
-
-def _current_model():
-    if yaml:
-        try:
-            with open(CFG, encoding="utf-8") as fh:
-                cfg = yaml.safe_load(fh) or {}
-            m = cfg.get("model") or {}
-            return f"{m.get('provider', '')}/{m.get('default', '')}"
-        except Exception:  # noqa: BLE001
-            pass
-    provider = model = ""
-    section = None
-    for line in _read_text(CFG).splitlines():
-        if line.startswith("model:"):
-            section = "model"
-            continue
-        if section == "model":
-            if line and not line[0].isspace():
-                section = None
-                continue
-            s = line.strip()
-            if s.startswith("provider:"):
-                provider = s.split(":", 1)[1].strip()
-            elif s.startswith("default:"):
-                model = s.split(":", 1)[1].strip()
-    return f"{provider}/{model}" if provider or model else ""
-
-
-def log_tail(lines=8):
-    return [ln.rstrip() for ln in _read_text(GW_LOG).splitlines()[-lines:]]
-
-
-def restart_gateway(wait=30):
-    before = gateway_pids()
-    _run(["tmux", "kill-session", "-t", TMUX_SESSION], timeout=15)
-
-    tmux = shutil.which("tmux")
-    if tmux:
-        inner = (f"PYTHONUNBUFFERED=1 {HERMES_BIN} gateway run --replace "
-                 f"2>&1 | tee {GW_LOG}")
-        code, out = _run([tmux, "new-session", "-d", "-s", TMUX_SESSION,
-                          "-x", "200", "-y", "50", inner], timeout=30)
-    else:
-        code, out = _run([HERMES_BIN, "gateway", "run", "--replace"], timeout=30)
-
-    deadline = time.time() + wait
-    pids = []
-    while time.time() < deadline:
-        time.sleep(1.5)
-        pids = gateway_pids()
-        if pids:
-            break
-    return {"started": bool(pids), "killed": before, "pids": pids, "exit_code": code,
-            "detail": out.strip()[:400], "status": gateway_status()}
-
-
-def stop_gateway():
-    before = gateway_pids()
-    _run(["tmux", "kill-session", "-t", TMUX_SESSION], timeout=15)
-    for pid in before:
-        _run(["kill", "-TERM", pid], timeout=10)
-    time.sleep(3)
-    return {"killed": before, "remaining": gateway_pids(), "status": gateway_status()}
-
-
-# ---------------------------------------------------------------------------
-# config
-# ---------------------------------------------------------------------------
-FIELDS = [
-    {"key": "model.provider", "label": "پرووایدر فعال", "group": "مدل",
-     "type": "enum", "source": "providers"},
-    {"key": "model.default", "label": "مدل پیش‌فرض", "group": "مدل",
-     "type": "enum", "source": "models"},
-    {"key": "model.api_mode", "label": "پروتکل API", "group": "مدل", "type": "enum",
-     "options": ["anthropic_messages", "chat_completions", "codex_responses"]},
-    {"key": "agent.reasoning_effort", "label": "سطح استدلال", "group": "مدل", "type": "enum",
-     "options": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]},
-    {"key": "agent.max_turns", "label": "حداکثر نوبت عامل", "group": "مدل",
-     "type": "int", "min": 10, "max": 1000, "step": 10},
-
-    {"key": "streaming.enabled", "label": "استریم در چت", "group": "استریم", "type": "bool"},
-    {"key": "streaming.transport", "label": "روش استریم", "group": "استریم", "type": "enum",
-     "options": ["auto", "draft", "edit"]},
-    {"key": "streaming.edit_interval", "label": "فاصله به‌روزرسانی (ثانیه)", "group": "استریم",
-     "type": "float", "min": 0.3, "max": 5.0, "step": 0.1},
-    {"key": "display.streaming", "label": "استریم در ترمینال", "group": "استریم", "type": "bool"},
-
-    {"key": "voice.auto_tts", "label": "پاسخ صوتی خودکار", "group": "صدا", "type": "bool"},
-    {"key": "tts.provider", "label": "سرویس گفتار (TTS)", "group": "صدا", "type": "enum",
-     "options": ["elevenlabs", "edge", "openai", "none"]},
-    {"key": "tts.elevenlabs.model_id", "label": "مدل صدا", "group": "صدا", "type": "enum",
-     "options": ["eleven_v4", "eleven_v4_turbo", "eleven_v3", "eleven_multilingual_v2"]},
-    {"key": "tts.elevenlabs.voice_id", "label": "شناسه صدا", "group": "صدا", "type": "str"},
-    {"key": "stt.provider", "label": "تبدیل گفتار به متن", "group": "صدا", "type": "enum",
-     "options": ["elevenlabs", "openai", "local", "none"]},
-    {"key": "stt.language", "label": "زبان گفتار", "group": "صدا", "type": "enum",
-     "options": ["fa", "en", "auto"]},
-
-    {"key": "display.tool_progress", "label": "نمایش اجرای ابزارها", "group": "نمایش",
-     "type": "enum", "options": ["all", "concise", "none"]},
-    {"key": "display.show_reasoning", "label": "نمایش استدلال", "group": "نمایش", "type": "bool"},
-    {"key": "gateway.message_timestamps.enabled", "label": "مهر زمانی پیام‌ها",
-     "group": "نمایش", "type": "bool"},
-
-    {"key": "compression.threshold", "label": "آستانه فشرده‌سازی", "group": "سیستم",
-     "type": "float", "min": 0.2, "max": 0.95, "step": 0.05},
-    {"key": "approvals.mode", "label": "تأیید دستورهای خطرناک", "group": "سیستم",
-     "type": "enum", "options": ["off", "on", "destructive"]},
-    {"key": "timezone", "label": "منطقه زمانی", "group": "سیستم", "type": "str"},
-]
-
-RESTART_PREFIXES = ("model.", "streaming.", "tts.", "stt.", "voice.", "display.",
-                    "agent.", "compression.", "gateway.message_timestamps")
-
-
-def load_config():
-    if not yaml:
-        raise RuntimeError("yaml unavailable — gwctl must run under the Hermes venv")
-    with open(CFG, encoding="utf-8") as fh:
+def load_config(profile=None):
+    with open(os.path.join(home_of(profile), "config.yaml"), encoding="utf-8") as fh:
         return yaml.safe_load(fh) or {}
 
 
@@ -370,370 +161,478 @@ def get_path(cfg, path):
     return cur
 
 
-def set_path(cfg, path, value):
-    parts = path.split(".")
-    cur = cfg
-    for part in parts[:-1]:
-        nxt = cur.get(part)
-        if not isinstance(nxt, dict):
-            nxt = {}
-            cur[part] = nxt
-        cur = nxt
-    cur[parts[-1]] = value
+def read_env(profile=None):
+    out = {}
+    for line in read_text(os.path.join(home_of(profile), ".env")).splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip().strip("\"'")
+    return out
 
 
-def coerce(field, raw):
-    t = field.get("type")
-    if t == "bool":
-        if isinstance(raw, bool):
-            return raw
-        return str(raw).strip().lower() in ("1", "true", "yes", "on")
-    if t == "int":
-        return int(float(raw))
-    if t == "float":
-        return round(float(raw), 2)
-    return "" if raw is None else str(raw)
-
-
-def config_snapshot():
-    cfg = load_config()
-    providers = sorted((cfg.get("providers") or {}).keys())
-    models = []
-    for pname, pdata in (cfg.get("providers") or {}).items():
-        for mname, _meta in _model_items((pdata or {}).get("models")):
-            models.append(f"{pname}/{mname}")
-    current = _current_model()
-    if current and current not in models:
-        models.insert(0, current)
-
-    fields = []
-    for f in FIELDS:
-        item = dict(f)
-        item["value"] = get_path(cfg, f["key"])
-        if f.get("source") == "providers":
-            item["options"] = providers
-        elif f.get("source") == "models":
-            item["options"] = models
-        fields.append(item)
-
-    return {"model": current, "providers": providers, "models": models,
-            "fields": fields, "raw": _redact(cfg), "path": CFG, "editable": True}
-
-
-def _redact(obj):
-    if isinstance(obj, dict):
-        out = {}
-        for k, v in obj.items():
-            if re.search(r"(api_key|token|secret|password)", str(k), re.I) \
-                    and isinstance(v, (str, int, float)) and str(v):
-                out[k] = _mask(v)
-            else:
-                out[k] = _redact(v)
-        return out
-    if isinstance(obj, list):
-        return [_redact(v) for v in obj]
-    return obj
-
-
-def write_config(cfg):
-    os.makedirs(BACKUPS, exist_ok=True)
-    backup = os.path.join(BACKUPS, time.strftime("config-%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4] + ".yaml")
-    shutil.copy2(CFG, backup)
-    tmp = CFG + ".hcontrol.tmp"
+def write_env(profile, name, value):
+    path = os.path.join(home_of(profile), ".env")
+    lines = read_text(path).splitlines()
+    lines = [ln for ln in lines if not ln.startswith(name + "=")]
+    if value:
+        lines.append(f"{name}={value}")
+    tmp = path + ".gwctl.tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        yaml.safe_dump(cfg, fh, sort_keys=False, allow_unicode=True,
-                       default_flow_style=False)
-    os.replace(tmp, CFG)
-    try:
-        for old in sorted(os.listdir(BACKUPS))[:-20]:
-            os.remove(os.path.join(BACKUPS, old))
-    except Exception:  # noqa: BLE001
-        pass
-    return backup
+        fh.write("\n".join(lines) + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
 
 
-# ---------------------------------------------------------------------------
-# models + keys
-# ---------------------------------------------------------------------------
-def _provider_conf(cfg, provider):
-    return ((cfg.get("providers") or {}).get(provider) or {})
-
-
-def _key_for(provider):
-    pool = _read_json(AUTH).get("credential_pool") or {}
-    entries = pool.get(provider) or []
-    fallback = None
-    for e in entries:
-        token = e.get("access_token")
-        if not token:
-            continue
-        if e.get("last_status") in (None, "ok"):
-            return token
-        fallback = fallback or token
-    if fallback:
-        return fallback
-    env_name = provider.upper().replace("-", "_") + "_API_KEY"
-    for line in _read_text(os.path.join(HERMES, ".env")).splitlines():
-        if line.startswith(env_name + "="):
-            return line.split("=", 1)[1].strip().strip('"').strip("'")
-    try:
-        return _provider_conf(load_config(), provider).get("api_key") or ""
-    except Exception:  # noqa: BLE001
-        return ""
-
-
-def _http_json(url, headers=None, body=None, timeout=25):
-    h = {"User-Agent": UA, "Accept": "application/json"}
-    if headers:
-        h.update(headers)
+def http_json(url, headers=None, body=None, timeout=25):
+    h = {"Accept": "application/json", "User-Agent": "gwctl/3"}
+    h.update(headers or {})
     data = json.dumps(body).encode() if body is not None else None
     if data:
         h["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=h,
-                                 method="POST" if data else "GET")
+    req = urllib.request.Request(url, data=data, headers=h, method="POST" if data else "GET")
     started = time.time()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read().decode("utf-8", "replace"), \
-                int((time.time() - started) * 1000)
+            return resp.status, resp.read().decode("utf-8", "replace"), int((time.time() - started) * 1000)
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "replace"), int((time.time() - started) * 1000)
     except Exception as e:  # noqa: BLE001
         return 0, str(e), int((time.time() - started) * 1000)
 
 
-def _model_items(models):
-    """Providers may declare models as a dict (with metadata) OR a plain list.
+# ---------------------------------------------------------------------------
+# processes / services
+# ---------------------------------------------------------------------------
+def _argv(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return [a.decode("utf-8", "replace") for a in fh.read().split(b"\0") if a]
+    except Exception:  # noqa: BLE001
+        return []
 
-    `providers.antigravity.models` on this phone is a list of model ids, so any code
-    that blindly calls .items() blows up with
-    "'list' object has no attribute 'items'".
-    """
+
+def _is_gateway(argv, profile):
+    """A real gateway process, not the tmux/shell wrapper whose -c string mentions it."""
+    if not argv or os.path.basename(argv[0]) in ("sh", "bash", "tmux", "dash"):
+        return False
+    if "gateway" not in argv or "run" not in argv:
+        return False
+    named = argv[argv.index("-p") + 1] if "-p" in argv[:-1] else "default"
+    return named == (profile or "default")
+
+
+def gateway_pids(profile=None):
+    state = read_json(os.path.join(home_of(profile), "gateway_state.json"))
+    recorded = str(state.get("pid") or "")
+    if recorded.isdigit() and _is_gateway(_argv(recorded), profile):
+        return [recorded]
+    return [e for e in os.listdir("/proc") if e.isdigit() and _is_gateway(_argv(e), profile)]
+
+
+def pid_uptime(pid):
+    # /proc/uptime is blocked for Termux; procps `ps -o etimes` answers directly.
+    code, out = run(["ps", "-o", "etimes=", "-p", str(pid)], timeout=8)
+    return int(out) if code == 0 and out.strip().isdigit() else None
+
+
+def pid_rss(pid):
+    for line in read_text(f"/proc/{pid}/status").splitlines():
+        if line.startswith("VmRSS:"):
+            return int(line.split()[1])
+    return 0
+
+
+def services():
+    code, out = run(["sh", SVC, "list"], timeout=20)
+    rows = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            rows.append({"name": parts[0], "running": parts[1] == "running"})
+    return rows
+
+
+def service_action(name, action):
+    if action not in ("start", "stop", "restart"):
+        return {"ok": False, "error": "bad action"}
+    if not re.fullmatch(r"[a-z0-9_-]+", name or ""):
+        return {"ok": False, "error": "bad service"}
+    code, out = run(["sh", SVC, action, name], timeout=30)
+    return {"ok": code == 0, "output": out[-400:], "services": services()}
+
+
+# ---------------------------------------------------------------------------
+# gateway status
+# ---------------------------------------------------------------------------
+def current_model(cfg):
+    m = cfg.get("model") or {}
+    return f"{m.get('provider', '')}/{m.get('default', '')}"
+
+
+def gateway_status(profile=None):
+    home = home_of(profile)
+    pids = gateway_pids(profile)
+    state = read_json(os.path.join(home, "gateway_state.json"))
+    tg = (state.get("platforms") or {}).get("telegram") or {}
+    tg_state = tg.get("state") or "unknown"
+    fresh = str(state.get("pid") or "") in pids
+    overall = "online" if pids and fresh else ("starting" if pids else "offline")
+    try:
+        model = current_model(load_config(profile))
+    except Exception:  # noqa: BLE001
+        model = ""
+    pid = pids[0] if pids else None
+    return {
+        "profile": profile or "default",
+        "overall": overall,
+        "health": "ok" if overall == "online" and tg_state == "connected" else overall,
+        "pid": pid,
+        "pids": pids,
+        "telegram": tg_state,
+        "telegram_error": tg.get("error_message") or "",
+        "needs_attention": bool(tg.get("needs_attention")),
+        "state_fresh": fresh,
+        "model": model,
+        "version": state.get("code_version") or "",
+        "uptime_seconds": pid_uptime(pid) if pid else None,
+        "rss_kb": pid_rss(pid) if pid else 0,
+        "active_agents": state.get("active_agents") or 0,
+        "checked_at": now(),
+    }
+
+
+def log_tail(profile=None, lines=8):
+    text = read_text(os.path.join(home_of(profile), "gw-live.log"))
+    return [ln.rstrip() for ln in text.splitlines()[-lines:]]
+
+
+def profile_names():
+    names = ["default"]
+    pdir = os.path.join(ROOT, "profiles")
+    if os.path.isdir(pdir):
+        names += sorted(d for d in os.listdir(pdir) if os.path.isdir(os.path.join(pdir, d)))
+    return names
+
+
+def profiles_payload():
+    out = []
+    for name in profile_names():
+        st = gateway_status(name)
+        env = read_env(name)
+        soul = read_text(os.path.join(home_of(name), "SOUL.md")).strip().splitlines()
+        out.append({"name": name, "model": st["model"], "overall": st["overall"],
+                    "telegram": st["telegram"], "has_bot": bool(env.get("TELEGRAM_BOT_TOKEN")),
+                    "soul": soul[0][:120] if soul else "", "service": "gw" if name == "default" else f"gw-{name}"})
+    return {"profiles": out}
+
+
+def svc_name(profile):
+    return "gw" if not profile or profile == "default" else f"gw-{profile}"
+
+
+def restart_gateway(profile=None, wait=40):
+    before = gateway_pids(profile)
+    code, out = run(["sh", SVC, "restart", svc_name(profile)], timeout=40)
+    deadline, pids = time.time() + wait, []
+    while time.time() < deadline:
+        time.sleep(1.5)
+        pids = [p for p in gateway_pids(profile) if p not in before] or []
+        if pids:
+            break
+    return {"started": bool(pids), "killed": before, "pids": pids, "exit_code": code,
+            "detail": out[-400:], "status": gateway_status(profile)}
+
+
+def stop_gateway(profile=None):
+    before = gateway_pids(profile)
+    run(["sh", SVC, "stop", svc_name(profile)], timeout=20)
+    for pid in gateway_pids(profile):
+        run(["kill", "-TERM", pid], timeout=5)
+    time.sleep(2)
+    return {"killed": before, "remaining": gateway_pids(profile), "status": gateway_status(profile)}
+
+
+# ---------------------------------------------------------------------------
+# config
+# ---------------------------------------------------------------------------
+FIELDS = [
+    {"key": "model.provider", "label": "پرووایدر فعال", "group": "مدل", "type": "enum", "source": "providers"},
+    {"key": "model.default", "label": "مدل پیش‌فرض", "group": "مدل", "type": "str"},
+    {"key": "agent.reasoning_effort", "label": "سطح استدلال", "group": "مدل", "type": "enum",
+     "options": ["none", "minimal", "low", "medium", "high", "xhigh"]},
+    {"key": "agent.max_turns", "label": "حداکثر نوبت عامل", "group": "مدل",
+     "type": "int", "min": 10, "max": 1000, "step": 10},
+    {"key": "delegation.max_concurrent_children", "label": "ساب‌ایجنت هم‌زمان", "group": "مدل",
+     "type": "int", "min": 1, "max": 10, "step": 1},
+
+    {"key": "approvals.mode", "label": "تأیید دستورهای خطرناک", "group": "دسترسی", "type": "enum",
+     "options": ["off", "smart", "manual"]},
+    {"key": "telegram.require_mention", "label": "در گروه فقط با منشن جواب بده", "group": "دسترسی",
+     "type": "bool"},
+
+    {"key": "streaming.enabled", "label": "استریم در چت", "group": "استریم", "type": "bool"},
+    {"key": "streaming.edit_interval", "label": "فاصله به‌روزرسانی (ثانیه)", "group": "استریم",
+     "type": "float", "min": 0.3, "max": 5.0, "step": 0.1},
+
+    {"key": "voice.auto_tts", "label": "پاسخ صوتی خودکار", "group": "صدا", "type": "bool"},
+    {"key": "tts.provider", "label": "سرویس گفتار (TTS)", "group": "صدا", "type": "enum",
+     "options": ["elevenlabs", "edge", "openai", "none"]},
+    {"key": "tts.elevenlabs.model_id", "label": "مدل صدا", "group": "صدا", "type": "enum",
+     "options": ["eleven_v4_turbo", "eleven_v4", "eleven_v3"]},
+    {"key": "tts.elevenlabs.voice_id", "label": "شناسه صدا", "group": "صدا", "type": "str"},
+    {"key": "stt.language", "label": "زبان گفتار", "group": "صدا", "type": "enum", "options": ["fa", "en", "auto"]},
+
+    {"key": "display.tool_progress", "label": "نمایش اجرای ابزارها", "group": "نمایش",
+     "type": "enum", "options": ["all", "concise", "none"]},
+    {"key": "display.show_reasoning", "label": "نمایش استدلال", "group": "نمایش", "type": "bool"},
+
+    {"key": "compression.threshold_tokens", "label": "آستانه فشرده‌سازی (توکن)", "group": "سیستم",
+     "type": "int", "min": 20000, "max": 900000, "step": 20000},
+    {"key": "timezone", "label": "منطقه زمانی", "group": "سیستم", "type": "str"},
+]
+FIELD_BY_KEY = {f["key"]: f for f in FIELDS}
+NO_RESTART = ("timezone",)
+
+
+def coerce(field, raw):
+    t = field.get("type")
+    if t == "bool":
+        return raw if isinstance(raw, bool) else str(raw).strip().lower() in ("1", "true", "yes", "on")
+    if t == "int":
+        v = int(float(raw))
+        return max(field.get("min", v), min(field.get("max", v), v))
+    if t == "float":
+        v = round(float(raw), 2)
+        return max(field.get("min", v), min(field.get("max", v), v))
+    return "" if raw is None else str(raw)
+
+
+def redact(obj):
+    if isinstance(obj, dict):
+        return {k: (mask(v) if re.search(r"api_key|token|secret|password", str(k), re.I)
+                    and isinstance(v, (str, int)) and str(v) else redact(v)) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [redact(v) for v in obj]
+    return obj
+
+
+def provider_names(cfg):
+    names = set((cfg.get("providers") or {}).keys()) | set(BUILTIN_BASES)
+    names.add((cfg.get("model") or {}).get("provider") or "")
+    return sorted(n for n in names if n)
+
+
+def config_snapshot(profile=None):
+    cfg = load_config(profile)
+    fields = []
+    for f in FIELDS:
+        item = dict(f, value=get_path(cfg, f["key"]))
+        if f.get("source") == "providers":
+            item["options"] = provider_names(cfg)
+        fields.append(item)
+    return {"profile": profile or "default", "model": current_model(cfg), "fields": fields,
+            "raw": yaml.safe_dump(redact(cfg), allow_unicode=True, sort_keys=False)}
+
+
+def set_config(profile, key, value):
+    field = FIELD_BY_KEY.get(key)
+    if not field:
+        return {"ok": False, "error": "field not editable"}
+    value = coerce(field, value)
+    text = json.dumps(value) if isinstance(value, bool) else str(value)
+    with WRITE_LOCK:
+        code, out = hermes(profile, "config", "set", key, text.lower() if isinstance(value, bool) else text)
+    return {"ok": code == 0, "key": key, "value": value, "detail": out[-300:],
+            "restart_required": code == 0 and key not in NO_RESTART}
+
+
+# ---------------------------------------------------------------------------
+# models / fallback / keys
+# ---------------------------------------------------------------------------
+def model_items(models):
+    """`models:` may be a dict (with metadata) or a plain list of ids."""
     if isinstance(models, dict):
         return [(str(k), v or {}) for k, v in models.items()]
     if isinstance(models, list):
-        out = []
-        for item in models:
-            if isinstance(item, dict):
-                mid = item.get("id") or item.get("name") or ""
-                if mid:
-                    out.append((str(mid), item))
-            elif item:
-                out.append((str(item), {}))
-        return out
+        return [(str(m.get("id") or m.get("name")), m) if isinstance(m, dict) else (str(m), {})
+                for m in models if m]
     return []
 
 
-def models_payload():
-    cfg = load_config()
+def provider_base(cfg, provider):
+    conf = (cfg.get("providers") or {}).get(provider) or {}
+    base = conf.get("api") or conf.get("base_url") or conf.get("url") or BUILTIN_BASES.get(provider, "")
+    return str(base).rstrip("/"), conf
+
+
+def key_for(profile, provider, cfg):
+    pool = (read_json(os.path.join(home_of(profile), "auth.json")).get("credential_pool") or {})
+    entries = [e for e in pool.get(provider) or [] if e.get("access_token")]
+    for e in entries:
+        if e.get("last_status") in (None, "ok"):
+            return e["access_token"]
+    if entries:
+        return entries[0]["access_token"]
+    env = read_env(profile)
+    _base, conf = provider_base(cfg, provider)
+    names = [conf.get("key_env")] + [s[1] for s in KEY_SLOTS if s[0] == provider] + \
+        [provider.upper().replace("-", "_") + "_API_KEY"]
+    for n in names:
+        if n and env.get(n):
+            return env[n]
+    return conf.get("api_key") or ""
+
+
+def provider_headers(cfg, provider):
+    _base, conf = provider_base(cfg, provider)
+    headers = dict(conf.get("extra_headers") or {})
+    if provider == (cfg.get("model") or {}).get("provider"):
+        headers.update((cfg.get("model") or {}).get("default_headers") or {})
+    return headers
+
+
+def models_payload(profile=None):
+    cfg = load_config(profile)
     configured = []
     for pname, pdata in (cfg.get("providers") or {}).items():
-        for mname, meta in _model_items((pdata or {}).get("models")):
-            meta = meta or {}
-            configured.append({
-                "provider": pname,
-                "model": mname,
-                "display": meta.get("display_name") or meta.get("name") or mname,
-                "context": meta.get("context_length"),
-                "tools": meta.get("supports_tools"),
-                "vision": meta.get("supports_vision"),
-            })
+        for mname, meta in model_items((pdata or {}).get("models")):
+            configured.append({"provider": pname, "model": mname,
+                               "display": meta.get("display_name") or mname,
+                               "context": meta.get("context_length"),
+                               "tools": meta.get("supports_tools"),
+                               "vision": meta.get("supports_vision")})
+    return {"current": current_model(cfg), "configured": configured,
+            "fallback": cfg.get("fallback_providers") or []}
 
-    live, live_error = [], None
-    conf = _provider_conf(cfg, "agentrouter")
-    if conf:
-        base = str(conf.get("base_url") or "").rstrip("/")
-        status, raw, _ms = _http_json(base + "/v1/models",
-                                      {"Authorization": "Bearer " + _key_for("agentrouter")})
-        if status == 200:
-            try:
-                live = [m.get("id") for m in (json.loads(raw).get("data") or [])]
-            except Exception:  # noqa: BLE001
-                live_error = raw[:200]
+
+def set_fallback(profile, chain):
+    clean = []
+    for e in chain or []:
+        if isinstance(e, dict) and e.get("provider") and e.get("model"):
+            clean.append({k: v for k, v in e.items() if k in ("provider", "model", "base_url", "key_env")})
+    path = os.path.join(home_of(profile), "config.yaml")
+    with WRITE_LOCK:
+        cfg = load_config(profile)
+        cfg["fallback_providers"] = clean
+        backup_dir = os.path.join(home_of(profile), "hcontrol-backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        shutil.copy2(path, os.path.join(backup_dir, time.strftime("config-%Y%m%d-%H%M%S.yaml")))
+        tmp = path + ".gwctl.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(cfg, fh, sort_keys=False, allow_unicode=True)
+        os.replace(tmp, path)
+    return {"ok": True, "fallback": clean, "restart_required": True}
+
+
+def switch_model(profile, provider, model):
+    if not provider or not model:
+        return {"ok": False, "error": "provider and model required"}
+    with WRITE_LOCK:
+        c1, o1 = hermes(profile, "config", "set", "model.provider", provider)
+        c2, o2 = hermes(profile, "config", "set", "model.default", model)
+    return {"ok": c1 == 0 and c2 == 0, "model": f"{provider}/{model}",
+            "detail": (o1 + "\n" + o2)[-300:], "restart_required": True}
+
+
+def test_model(profile, provider, model, prompt):
+    cfg = load_config(profile)
+    base, conf = provider_base(cfg, provider)
+    if not base:
+        return {"ok": False, "error": f"unknown provider '{provider}'"}
+    token = key_for(profile, provider, cfg)
+    mode = conf.get("transport") or conf.get("api_mode") or (
+        (cfg.get("model") or {}).get("api_mode") if provider == (cfg.get("model") or {}).get("provider")
+        else None) or "chat_completions"
+    headers = dict(provider_headers(cfg, provider), Authorization="Bearer " + token)
+    prompt = (prompt or "Reply with exactly: OK").strip()
+    if mode == "anthropic_messages":
+        url = base + ("/messages" if base.endswith("/v1") else "/v1/messages")
+        body = {"model": model, "max_tokens": 128, "messages": [{"role": "user", "content": prompt}]}
+        headers["anthropic-version"] = "2023-06-01"
+    else:
+        url = base + "/chat/completions"
+        body = {"model": model, "max_tokens": 128, "messages": [{"role": "user", "content": prompt}]}
+    status, raw, ms = http_json(url, headers, body, timeout=90)
+    if status != 200:
+        return {"ok": False, "status": status, "ms": ms, "mode": mode, "error": raw[:300]}
+    try:
+        payload = json.loads(raw)
+        if mode == "anthropic_messages":
+            text = "".join(b.get("text", "") for b in payload.get("content", []) if b.get("type") == "text")
         else:
-            live_error = f"HTTP {status}: {raw[:160]}"
-    return {"configured": configured, "live": live, "live_error": live_error,
-            "current": _current_model()}
+            text = ((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "status": status, "ms": ms, "mode": mode, "error": f"bad JSON: {exc}"}
+    return {"ok": True, "status": status, "ms": ms, "mode": mode, "reply": text.strip()[:400],
+            "usage": payload.get("usage") or {}}
 
 
-def keys_payload():
-    pool = _read_json(AUTH).get("credential_pool") or {}
-    now = time.time()
-    out = {}
+def keys_payload(profile=None):
+    pool = read_json(os.path.join(home_of(profile), "auth.json")).get("credential_pool") or {}
+    t = time.time()
+    providers = {}
     for provider, entries in pool.items():
         rows = []
         for e in entries or []:
             reset = e.get("last_error_reset_at")
-            cooldown = int(reset - now) if isinstance(reset, (int, float)) and reset > now else None
             rows.append({
-                "id": e.get("id"),
-                "label": e.get("label"),
-                "priority": e.get("priority"),
-                "source": e.get("source"),
-                "status": e.get("last_status") or "ok",
-                "error_code": e.get("last_error_code"),
-                "error_reason": e.get("last_error_reason"),
+                "id": e.get("id"), "label": e.get("label"), "priority": e.get("priority"),
+                "source": e.get("source"), "status": e.get("last_status") or "ok",
                 "error": (e.get("last_error_message") or "")[:180],
-                "cooldown": cooldown,
-                "requests": e.get("request_count") or 0,
-                "base_url": e.get("base_url"),
-                "key": _mask(e.get("access_token")),
-                "is_current": e.get("last_status") in (None, "ok"),
+                "cooldown": int(reset - t) if isinstance(reset, (int, float)) and reset > t else None,
+                "requests": e.get("request_count") or 0, "key": mask(e.get("access_token")),
             })
-        rows.sort(key=lambda r: (r.get("priority") or 0))
         if rows:
-            out[provider] = rows
-    return {"providers": out, "checked_at": _now()}
+            providers[provider] = sorted(rows, key=lambda r: r.get("priority") or 0)
+    env = read_env(profile)
+    slots = [{"provider": p, "env": n, "url": u, "set": bool(env.get(n)), "key": mask(env.get(n))}
+             for p, n, u in KEY_SLOTS]
+    return {"providers": providers, "slots": slots, "checked_at": now()}
 
 
-def test_keys(provider, entry_id=None):
-    cfg = load_config()
-    base = str(_provider_conf(cfg, provider).get("base_url") or "").rstrip("/")
-    url = base + "/v1/models"
-    pool = _read_json(AUTH).get("credential_pool") or {}
+def add_key(profile, provider, label, key):
+    args = ["auth", "add", provider, "--type", "api-key", "--api-key", key]
+    if label:
+        args += ["--label", label]
+    with WRITE_LOCK:
+        code, out = hermes(profile, *args, timeout=60)
+    return {"ok": code == 0, "detail": out[-300:]}
+
+
+def remove_key(profile, provider, entry_id):
+    with WRITE_LOCK:
+        code, out = hermes(profile, "auth", "remove", provider, entry_id, timeout=60)
+    return {"ok": code == 0, "detail": out[-300:]}
+
+
+def reset_keys(profile, provider):
+    with WRITE_LOCK:
+        code, out = hermes(profile, "auth", "reset", provider, timeout=60)
+    return {"ok": code == 0, "detail": out[-300:]}
+
+
+def test_keys(profile, provider, entry_id=None):
+    cfg = load_config(profile)
+    base, _conf = provider_base(cfg, provider)
+    pool = read_json(os.path.join(home_of(profile), "auth.json")).get("credential_pool") or {}
+    headers = provider_headers(cfg, provider)
     results = []
-    for e in (pool.get(provider) or []):
-        if entry_id and e.get("id") != entry_id:
+    for e in pool.get(provider) or []:
+        if (entry_id and e.get("id") != entry_id) or not e.get("access_token"):
             continue
-        token = e.get("access_token")
-        if not token:
-            continue
-        status, raw, ms = _http_json(url, {"Authorization": "Bearer " + token}, timeout=30)
-        results.append({"id": e.get("id"), "label": e.get("label"), "status": status,
-                        "ms": ms, "ok": status == 200,
-                        "detail": "ok" if status == 200 else f"HTTP {status}: {raw[:140]}"})
+        status, raw, ms = http_json(base + ("/models" if base.endswith("/v1") else "/v1/models"),
+                                    dict(headers, Authorization="Bearer " + e["access_token"]), timeout=30)
+        results.append({"id": e.get("id"), "label": e.get("label"), "status": status, "ms": ms,
+                        "ok": status == 200, "detail": "ok" if status == 200 else f"HTTP {status}: {raw[:140]}"})
     return {"provider": provider, "results": results}
 
 
-def reset_keys(provider):
-    store = _read_json(AUTH)
-    pool = store.get("credential_pool") or {}
-    cleared = 0
-    for e in pool.get(provider) or []:
-        for k in ("last_status", "last_status_at", "last_error_code", "last_error_reason",
-                  "last_error_message", "last_error_reset_at"):
-            if e.get(k) is not None:
-                e[k] = None
-                cleared += 1
-    if cleared:
-        _write_auth(store)
-    return {"provider": provider, "cleared": cleared,
-            "keys": keys_payload()["providers"].get(provider, [])}
-
-
-def add_key(provider, label, key):
-    store = _read_json(AUTH)
-    pool = store.setdefault("credential_pool", {})
-    entries = pool.setdefault(provider, [])
-    base = _provider_conf(load_config(), provider).get("base_url") or ""
-    entries.append({
-        "id": uuid.uuid4().hex[:6],
-        "label": label or f"key-{len(entries) + 1}",
-        "auth_type": "api_key",
-        "priority": len(entries),
-        "source": "manual",
-        "access_token": key,
-        "last_status": None,
-        "last_status_at": None,
-        "last_error_code": None,
-        "last_error_reason": None,
-        "last_error_message": None,
-        "last_error_reset_at": None,
-        "base_url": base,
-        "request_count": 0,
-    })
-    _write_auth(store)
-    return {"ok": True, "provider": provider, "count": len(entries)}
-
-
-def remove_key(provider, entry_id):
-    store = _read_json(AUTH)
-    pool = store.get("credential_pool") or {}
-    entries = pool.get(provider) or []
-    kept = [e for e in entries if e.get("id") != entry_id]
-    pool[provider] = kept
-    store["credential_pool"] = pool
-    _write_auth(store)
-    return {"ok": True, "provider": provider,
-            "removed": len(entries) - len(kept), "count": len(kept)}
-
-
-def _write_auth(store):
-    tmp = AUTH + ".hcontrol.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(store, fh, indent=2, ensure_ascii=False)
-    os.replace(tmp, AUTH)
-
-
-def switch_model(provider, model):
-    with CFG_LOCK:
-        cfg = load_config()
-        conf = _provider_conf(cfg, provider)
-        if not conf:
-            return {"ok": False, "error": f"provider '{provider}' not in config"}
-        node = cfg.setdefault("model", {})
-        node["provider"] = provider
-        node["default"] = model
-        if conf.get("api_mode"):
-            node["api_mode"] = conf["api_mode"]
-        backup = write_config(cfg)
-    return {"ok": True, "model": f"{provider}/{model}",
-            "backup": os.path.basename(backup), "restart_required": True}
-
-
-def test_model(provider, model, prompt):
-    cfg = load_config()
-    conf = _provider_conf(cfg, provider)
-    if not conf:
-        return {"ok": False, "error": f"unknown provider '{provider}'"}
-    base = str(conf.get("base_url") or "").rstrip("/")
-    mode = conf.get("api_mode") or "chat_completions"
-    token = _key_for(provider)
-    if not token:
-        return {"ok": False, "error": "no API key for provider"}
-    prompt = (prompt or "Reply with exactly: OK").strip()
-    text, usage = "", {}
-
-    if mode == "anthropic_messages":
-        status, raw, ms = _http_json(
-            base + "/v1/messages",
-            {"Authorization": "Bearer " + token, "anthropic-version": "2023-06-01"},
-            {"model": model, "max_tokens": 96,
-             "messages": [{"role": "user", "content": prompt}]}, timeout=90)
-    elif mode == "codex_responses":
-        status, raw, ms = _http_json(
-            base + "/responses", {"Authorization": "Bearer " + token},
-            {"model": model, "max_output_tokens": 96, "input": prompt}, timeout=90)
-    else:
-        status, raw, ms = _http_json(
-            base + "/chat/completions", {"Authorization": "Bearer " + token},
-            {"model": model, "max_tokens": 96,
-             "messages": [{"role": "user", "content": prompt}]}, timeout=90)
-
-    if status == 200:
-        try:
-            payload = json.loads(raw)
-            if mode == "anthropic_messages":
-                text = "".join(b.get("text", "") for b in payload.get("content", [])
-                               if b.get("type") == "text")
-            elif mode == "codex_responses":
-                for item in payload.get("output", []):
-                    for c in (item.get("content") or []):
-                        if c.get("text"):
-                            text += c["text"]
-            else:
-                choice = (payload.get("choices") or [{}])[0]
-                text = (choice.get("message") or {}).get("content") or ""
-            usage = payload.get("usage") or {}
-        except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "status": status, "ms": ms, "mode": mode,
-                    "error": f"bad JSON: {exc}"}
-
-    if status != 200:
-        return {"ok": False, "status": status, "ms": ms, "mode": mode,
-                "error": (raw if isinstance(raw, str) else str(raw))[:300]}
-    return {"ok": True, "status": status, "ms": ms, "mode": mode,
-            "reply": text.strip()[:400], "usage": usage}
+def set_env(profile, name, value):
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*_(API_KEY|TOKEN)", name or ""):
+        return {"ok": False, "error": "only *_API_KEY / *_TOKEN names"}
+    with WRITE_LOCK:
+        write_env(profile, name, (value or "").strip())
+    return {"ok": True, "name": name, "set": bool(value), "restart_required": True}
 
 
 # ---------------------------------------------------------------------------
@@ -741,19 +640,11 @@ def test_model(provider, model, prompt):
 # ---------------------------------------------------------------------------
 def system_payload():
     mem = {}
-    for line in _read_text("/proc/meminfo").splitlines():
-        if ":" in line:
-            k, v = line.split(":", 1)
-            mem[k.strip()] = v.strip()
-
-    def kb(key):
-        try:
-            return int(mem.get(key, "0").split()[0])
-        except Exception:  # noqa: BLE001
-            return 0
-
-    total, avail = kb("MemTotal"), kb("MemAvailable")
-    swap_total, swap_free = kb("SwapTotal"), kb("SwapFree")
+    for line in read_text("/proc/meminfo").splitlines():
+        k, _, v = line.partition(":")
+        mem[k.strip()] = int((v.split() or ["0"])[0])
+    total, avail = mem.get("MemTotal", 0), mem.get("MemAvailable", 0)
+    swap_total, swap_free = mem.get("SwapTotal", 0), mem.get("SwapFree", 0)
 
     storage = {}
     for label, path in (("داده", "/data"), ("حافظه", "/storage/emulated/0")):
@@ -765,193 +656,200 @@ def system_payload():
             pass
 
     battery = {}
-    code, out = _run(["termux-battery-status"], timeout=12)
-    if code == 0 and out.strip().startswith("{"):
-        try:
-            battery = json.loads(out)
-        except Exception:  # noqa: BLE001
-            battery = {}
-    if not battery:
-        try:
-            battery = {"percentage": int(_read_text(
-                "/sys/class/power_supply/battery/capacity").strip())}
-        except Exception:  # noqa: BLE001
-            battery = {}
-
-    load = os.getloadavg() if hasattr(os, "getloadavg") else (0, 0, 0)
-    procs = [{"pid": p, "uptime": _pid_uptime(int(p)), "rss_kb": _pid_rss(int(p))}
-             for p in gateway_pids()]
-
+    code, out = run(["termux-battery-status"], timeout=12)
+    if code == 0 and out.startswith("{"):
+        battery = json.loads(out)
+    load = os.getloadavg()
     return {
-        "battery": {"percent": battery.get("percentage"),
-                    "status": battery.get("status"),
-                    "plugged": battery.get("plugged"),
-                    "temperature": battery.get("temperature")},
-        "memory": {"total_kb": total, "available_kb": avail,
-                   "used_kb": max(0, total - avail),
+        "battery": {"percent": battery.get("percentage"), "status": battery.get("status"),
+                    "plugged": battery.get("plugged"), "temperature": battery.get("temperature")},
+        "memory": {"total_kb": total, "available_kb": avail, "used_kb": max(0, total - avail),
                    "percent": round((total - avail) / total * 100, 1) if total else 0,
                    "swap_total_kb": swap_total, "swap_free_kb": swap_free,
-                   "swap_percent": round((swap_total - swap_free) / swap_total * 100, 1)
-                   if swap_total else 0},
+                   "swap_percent": round((swap_total - swap_free) / swap_total * 100, 1) if swap_total else 0},
         "storage": storage,
         "load": {"1m": round(load[0], 2), "5m": round(load[1], 2), "15m": round(load[2], 2)},
-        "uptime_seconds": _sys_uptime(),
-        "gateway_procs": procs,
-        "checked_at": _now(),
+        "checked_at": now(),
     }
 
 
-LOG_FILES = ["gw-live.log", "gwctl.log", "gateway.log", "gw2.log", "gw3.log",
-             "bridge.log", "gwctl-access.log"]
+LOG_FILES = ["gw-live.log", "gwctl.log", "bridge.log", "router.log", "boot.log"]
 
 
-def logs_files():
+def logs_files(profile=None):
     out = []
     for name in LOG_FILES:
-        path = os.path.join(HERMES, name)
+        path = os.path.join(home_of(profile) if name == "gw-live.log" else ROOT, name)
         if os.path.exists(path):
             st = os.stat(path)
             out.append({"name": name, "size": st.st_size,
-                        "mtime": time.strftime("%Y-%m-%d %H:%M:%S",
-                                               time.localtime(st.st_mtime))})
-    out.sort(key=lambda r: r["mtime"], reverse=True)
-    return out
+                        "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime))})
+    return sorted(out, key=lambda r: r["mtime"], reverse=True)
 
 
-def logs_tail(name, lines, needle):
+def logs_tail(profile, name, lines, needle):
     if name not in LOG_FILES:
         return {"error": "unknown log", "lines": []}
-    path = os.path.join(HERMES, name)
-    size = 0
+    path = os.path.join(home_of(profile) if name == "gw-live.log" else ROOT, name)
     try:
         with open(path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
             size = fh.tell()
-            fh.seek(max(0, size - 200_000))
-            chunk = fh.read().decode("utf-8", "replace")
+            fh.seek(max(0, size - 300_000))
+            rows = fh.read().decode("utf-8", "replace").splitlines()
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc), "lines": []}
-    rows = chunk.splitlines()
     if needle:
-        n = needle.lower()
-        rows = [r for r in rows if n in r.lower()]
-    rows = rows[-max(1, min(int(lines or 120), 800)):]
+        rows = [r for r in rows if needle.lower() in r.lower()]
+    rows = rows[-max(1, min(int(lines or 150), 1000)):]
     return {"file": name, "lines": rows, "size": size, "matched": len(rows)}
 
 
-def checks_payload():
+def checks_payload(profile=None):
+    cfg = load_config(profile)
     results = []
-    cfg = load_config()
-    base = str(_provider_conf(cfg, "agentrouter").get("base_url") or "").rstrip("/")
-    token = _key_for("agentrouter")
 
-    def battery_opt():
-        # /system/bin/dumpsys exists but DeviceIdleController needs the DUMP signature
-        # permission, which a Termux uid does not have; `dumpsys` is not even on the
-        # Termux PATH. Report "unknown" instead of a false FAIL — only `adb shell`
-        # can read this.
-        for path in ("/system/bin/dumpsys", "dumpsys"):
-            code, out = _run([path, "deviceidle", "whitelist"], timeout=15)
-            if "com.termux" in out:
-                return True, "allowlisted"
-            if "Permission Denial" in out or "not found" in out or code != 0:
-                continue
-            if out.strip():
-                return False, "not allowlisted"
-        return None, "از Termux قابل خواندن نیست (نیازمند adb)"
-
-    def agentrouter():
-        s, _raw, ms = _http_json(base + "/v1/models",
-                                 {"Authorization": "Bearer " + token}, timeout=25)
-        return s == 200, f"HTTP {s} · {ms} ms"
-
-    def telegram():
-        s, _raw, _ms = _http_json("https://api.telegram.org/", timeout=20)
-        return s in (200, 302, 404), f"HTTP {s}"
-
-    def dns():
-        return True, socket.gethostbyname("agentrouter.org")
-
-    def venv():
-        p = os.path.join(PREFIX, "lib/hermes-agent/app/venv/bin/python")
-        return os.path.exists(p), "venv OK" if os.path.exists(p) else "missing"
-
-    def add_check(name, label, fn):
+    def add(name, label, fn):
         started = time.time()
         try:
-            result = fn()
+            ok, detail = fn()
         except Exception as exc:  # noqa: BLE001
-            result = (False, str(exc)[:160])
-        if isinstance(result, tuple) and len(result) == 2:
-            ok, detail = result
-        else:
-            ok, detail = result, ""
-        item = {"name": name, "label": label, "ms": int((time.time() - started) * 1000),
-                "detail": str(detail)[:200]}
+            ok, detail = False, str(exc)[:160]
+        item = {"name": name, "label": label, "ok": bool(ok), "detail": str(detail)[:200],
+                "ms": int((time.time() - started) * 1000)}
         if ok is None:
-            item["ok"] = False
-            item["skipped"] = True
-        else:
-            item["ok"] = bool(ok)
+            item.update(ok=False, skipped=True)
         results.append(item)
 
-    add_check("agentrouter", "AgentRouter API", agentrouter)
-    add_check("telegram", "Telegram API", telegram)
-    add_check("dns", "DNS", dns)
-    tg = gateway_status().get("telegram")
-    results.append({"name": "telegram_bot", "label": "ربات تلگرام",
-                    "ok": tg == "connected", "ms": 0, "detail": tg or "unknown"})
-    add_check("venv", "محیط پایتون", venv)
-    add_check("battery_opt", "معاف از بهینه‌سازی باتری", battery_opt)
-    return {"checks": results, "checked_at": _now()}
+    def reach(url, headers=None, good=(200,)):
+        def fn():
+            s, _raw, ms = http_json(url, headers, timeout=15)
+            return s in good, f"HTTP {s} · {ms} ms"
+        return fn
+
+    def provider_check(provider):
+        base, _conf = provider_base(cfg, provider)
+        token = key_for(profile, provider, cfg)
+        if not token:
+            return lambda: (None, "کلید ندارد")
+        url = base + ("/models" if base.endswith(("/v1", "/openai", "/api/v1")) else "/v1/models")
+        return reach(url, dict(provider_headers(cfg, provider), Authorization="Bearer " + token))
+
+    def vpn():
+        # /sys/class/net is unreadable for the Termux uid; the shell uid (rish) may list it.
+        # tunl0 is the kernel's always-present IPIP device, not a VPN.
+        code, out = run(["rish", "-c", "ls /sys/class/net"], timeout=10)
+        if code != 0:
+            return None, "rish در دسترس نیست"
+        tun = [n for n in out.split() if re.fullmatch(r"tun\d+|wg\w*|ppp\d+", n)]
+        return (True, ", ".join(tun)) if tun else (False, "VPN روشن نیست")
+
+    def dns():
+        return True, "api.telegram.org → " + socket.gethostbyname("api.telegram.org")
+
+    def battery_opt():
+        code, out = run(["rish", "-c", "dumpsys deviceidle whitelist"], timeout=15)
+        if code != 0:
+            return None, "rish در دسترس نیست"
+        missing = [p for p in ("com.termux", "ir.emad.hermesctl") if p not in out]
+        return not missing, "همه معاف" if not missing else "معاف نیست: " + ", ".join(missing)
+
+    add("vpn", "VPN", vpn)
+    add("telegram", "Telegram API", reach("https://api.telegram.org/", good=(200, 302, 404)))
+    add("dns", "DNS تلگرام", dns)
+    st = gateway_status(profile)
+    results.append({"name": "telegram_bot", "label": "ربات تلگرام", "ok": st["telegram"] == "connected",
+                    "ms": 0, "detail": st["telegram_error"] or st["telegram"]})
+    seen = {(cfg.get("model") or {}).get("provider")} | \
+        {e.get("provider") for e in cfg.get("fallback_providers") or [] if isinstance(e, dict)}
+    for p in sorted(x for x in seen if x):
+        add("provider:" + p, "مدل: " + p, provider_check(p))
+    add("bridge", "پل Antigravity", reach("http://127.0.0.1:8790/health"))
+    add("router", "OmniRoute", reach("http://127.0.0.1:20128/v1/models", good=(200, 401)))
+    add("battery_opt", "معافیت باتری", battery_opt)
+    return {"checks": results, "checked_at": now()}
 
 
-def cron_payload():
+def cron_payload(profile=None):
     jobs = []
-    for j in (_read_json(JOBS).get("jobs") or []):
-        jobs.append({
-            "id": j.get("id"),
-            "name": j.get("name"),
-            "schedule": (j.get("schedule") or {}).get("display") or j.get("schedule_display"),
-            "state": j.get("state"),
-            "last_status": j.get("last_status"),
-            "last_run": j.get("last_run_at"),
-            "next_run": j.get("next_run_at"),
-            "error": (j.get("last_error") or "")[:200],
-            "mode": "script" if j.get("no_agent") else "agent",
-        })
+    for j in read_json(os.path.join(home_of(profile), "cron", "jobs.json")).get("jobs") or []:
+        jobs.append({"id": j.get("id"), "name": j.get("name"),
+                     "schedule": (j.get("schedule") or {}).get("display") or j.get("schedule_display"),
+                     "state": j.get("state"), "last_status": j.get("last_status"),
+                     "last_run": j.get("last_run_at"), "next_run": j.get("next_run_at"),
+                     "error": (j.get("last_error") or "")[:200],
+                     "mode": "script" if j.get("no_agent") else "agent"})
     return {"jobs": jobs, "count": len(jobs)}
 
 
-def cron_action(job_id, action):
+def cron_action(profile, job_id, action):
     if action not in ("run", "pause", "resume"):
         return {"ok": False, "error": "bad action"}
-    code, out = _run([HERMES_BIN, "cron", action, job_id], timeout=90)
-    return {"ok": code == 0, "action": action, "code": code,
-            "output": out.strip()[:400], "jobs": cron_payload()["jobs"]}
+    code, out = hermes(profile, "cron", action, job_id, timeout=90)
+    return {"ok": code == 0, "action": action, "output": out[-400:], "jobs": cron_payload(profile)["jobs"]}
 
 
-def agent_test(prompt):
-    prompt = prompt or "reply with exactly the word: READY"
+def agent_test(profile, prompt):
     started = time.time()
-    code, out = _run([HERMES_BIN, "-z", prompt], timeout=180)
-    return {"ok": code == 0, "code": code, "ms": int((time.time() - started) * 1000),
-            "reply": out.strip()[-600:]}
+    code, out = hermes(profile, "-z", prompt or "reply with exactly the word: READY", timeout=180)
+    return {"ok": code == 0, "code": code, "ms": int((time.time() - started) * 1000), "reply": out[-600:]}
+
+
+def send_message(profile, text, target):
+    if not text:
+        return {"ok": False, "error": "empty"}
+    code, out = hermes(profile, "send", "-t", target or "telegram", "--json", text, timeout=60)
+    return {"ok": code == 0, "detail": out[-300:]}
+
+
+def overview():
+    return {"profiles": [gateway_status(p) for p in profile_names()], "services": services(),
+            "checked_at": now()}
 
 
 # ---------------------------------------------------------------------------
 # HTTP
 # ---------------------------------------------------------------------------
-class Handler(BaseHTTPRequestHandler):
-    server_version = "gwctl/2.0"
+GET_ROUTES = {
+    "/ping": lambda q, p: {"ok": True, "api": API_VERSION},
+    "/version": lambda q, p: {"api": API_VERSION, "gwctl": VERSION,
+                              "hermes": (hermes(None, "--version", timeout=40)[1].splitlines() or [""])[0]},
+    "/status": lambda q, p: dict(gateway_status(p), log_tail=log_tail(p, 6), api=API_VERSION),
+    "/overview": lambda q, p: overview(),
+    "/system": lambda q, p: system_payload(),
+    "/services": lambda q, p: {"services": services()},
+    "/profiles": lambda q, p: profiles_payload(),
+    "/config": lambda q, p: config_snapshot(p),
+    "/models": lambda q, p: models_payload(p),
+    "/fallback": lambda q, p: {"fallback": load_config(p).get("fallback_providers") or []},
+    "/keys": lambda q, p: keys_payload(p),
+    "/logs/files": lambda q, p: {"files": logs_files(p)},
+    "/logs": lambda q, p: logs_tail(p, q.get("file", "gw-live.log"), q.get("lines", 150), q.get("filter", "")),
+    "/checks": lambda q, p: checks_payload(p),
+    "/cron": lambda q, p: cron_payload(p),
+}
+POST_ROUTES = {
+    "/services/action": lambda b, p: service_action(b.get("name"), b.get("action")),
+    "/config/set": lambda b, p: set_config(p, b.get("key"), b.get("value")),
+    "/model/switch": lambda b, p: switch_model(p, b.get("provider"), b.get("model")),
+    "/model/test": lambda b, p: test_model(p, b.get("provider"), b.get("model"), b.get("prompt")),
+    "/fallback/set": lambda b, p: set_fallback(p, b.get("chain")),
+    "/keys/add": lambda b, p: add_key(p, b.get("provider"), b.get("label"), b.get("key"))
+    if b.get("provider") and b.get("key") else {"ok": False, "error": "provider and key required"},
+    "/keys/remove": lambda b, p: remove_key(p, b.get("provider"), b.get("id")),
+    "/keys/reset": lambda b, p: reset_keys(p, b.get("provider")),
+    "/keys/test": lambda b, p: test_keys(p, b.get("provider"), b.get("id")),
+    "/env/set": lambda b, p: set_env(p, b.get("name"), b.get("value")),
+    "/cron/action": lambda b, p: cron_action(p, b.get("id"), b.get("action")),
+    "/agent/test": lambda b, p: agent_test(p, b.get("prompt")),
+    "/send": lambda b, p: send_message(p, b.get("text"), b.get("target")),
+    "/gateway/restart": lambda b, p: restart_gateway(p),
+    "/gateway/stop": lambda b, p: stop_gateway(p),
+}
 
-    def _note(self, what):
-        try:
-            with open(os.path.join(HERMES, "gwctl-access.log"), "a", encoding="utf-8") as fh:
-                fh.write(f"{_now()} {self.client_address[0]} {self.command} {what} "
-                         f"ua={self.headers.get('User-Agent', '-')[:40]}\n")
-        except Exception:  # noqa: BLE001
-            pass
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "gwctl/" + VERSION
 
     def _send(self, payload, code=200):
         body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
@@ -964,101 +862,32 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    def _body(self):
+    def _dispatch(self, routes, arg):
+        path, _, query = self.path.partition("?")
+        path = path.rstrip("/") or "/"
+        q = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
+        handler = routes.get(path)
+        if not handler:
+            return self._send({"error": "not found", "path": path}, 404)
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(length) if length else b""
-            return json.loads(raw.decode("utf-8")) if raw else {}
-        except Exception:  # noqa: BLE001
-            return {}
-
-    def _query(self):
-        if "?" not in self.path:
-            return {}
-        return {k: v[0] for k, v in
-                urllib.parse.parse_qs(self.path.split("?", 1)[1]).items()}
+            profile = q.get("profile") or (arg or {}).get("profile") or None
+            home_of(profile)  # validate early
+            return self._send(handler(q if arg is None else arg, profile))
+        except ValueError as exc:
+            return self._send({"ok": False, "error": str(exc)}, 400)
+        except Exception as exc:  # noqa: BLE001
+            return self._send({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, 500)
 
     def do_GET(self):  # noqa: N802
-        path = self.path.split("?")[0].rstrip("/") or "/"
-        self._note(path)
-        q = self._query()
-        try:
-            if path == "/ping":
-                return self._send({"ok": True, "api": API_VERSION})
-            if path == "/version":
-                code, out = _run([HERMES_BIN, "--version"], timeout=40)
-                first = out.strip().splitlines()[0] if out.strip() else ""
-                return self._send({"api": API_VERSION, "gwctl": "2.0", "hermes": first})
-            if path == "/status":
-                st = gateway_status()
-                st["log_tail"] = log_tail(6)
-                st["api"] = API_VERSION
-                return self._send(st)
-            if path == "/system":
-                return self._send(system_payload())
-            if path == "/config":
-                return self._send(config_snapshot())
-            if path == "/models":
-                return self._send(models_payload())
-            if path == "/keys":
-                return self._send(keys_payload())
-            if path == "/logs/files":
-                return self._send({"files": logs_files()})
-            if path == "/logs":
-                return self._send(logs_tail(q.get("file", "gw-live.log"),
-                                            q.get("lines", 120), q.get("filter") or ""))
-            if path == "/checks":
-                return self._send(checks_payload())
-            if path == "/cron":
-                return self._send(cron_payload())
-            return self._send({"error": "not found", "path": path}, 404)
-        except Exception as exc:  # noqa: BLE001
-            return self._send({"error": f"{type(exc).__name__}: {exc}"}, 500)
+        self._dispatch(GET_ROUTES, None)
 
     def do_POST(self):  # noqa: N802
-        path = self.path.split("?")[0].rstrip("/")
-        self._note(path)
-        body = self._body()
         try:
-            if path == "/config/set":
-                key = body.get("key") or ""
-                field = next((f for f in FIELDS if f["key"] == key), None)
-                if not field:
-                    return self._send({"ok": False, "error": "field not editable"}, 400)
-                value = coerce(field, body.get("value"))
-                with CFG_LOCK:
-                    cfg = load_config()
-                    set_path(cfg, key, value)
-                    backup = write_config(cfg)
-                return self._send({"ok": True, "key": key, "value": value,
-                                   "backup": os.path.basename(backup),
-                                   "restart_required": key.startswith(RESTART_PREFIXES)})
-            if path == "/model/switch":
-                return self._send(switch_model(body.get("provider"), body.get("model")))
-            if path == "/model/test":
-                return self._send(test_model(body.get("provider"), body.get("model"),
-                                             body.get("prompt")))
-            if path == "/keys/test":
-                return self._send(test_keys(body.get("provider"), body.get("id")))
-            if path == "/keys/reset":
-                return self._send(reset_keys(body.get("provider")))
-            if path == "/keys/add":
-                if not (body.get("provider") and body.get("key")):
-                    return self._send({"ok": False, "error": "provider and key required"}, 400)
-                return self._send(add_key(body["provider"], body.get("label"), body["key"]))
-            if path == "/keys/remove":
-                return self._send(remove_key(body.get("provider"), body.get("id")))
-            if path == "/cron/action":
-                return self._send(cron_action(body.get("id"), body.get("action")))
-            if path == "/agent/test":
-                return self._send(agent_test(body.get("prompt")))
-            if path == "/gateway/restart":
-                return self._send(restart_gateway())
-            if path == "/gateway/stop":
-                return self._send(stop_gateway())
-            return self._send({"error": "not found", "path": path}, 404)
-        except Exception as exc:  # noqa: BLE001
-            return self._send({"error": f"{type(exc).__name__}: {exc}"}, 500)
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}") if length else {}
+        except Exception:  # noqa: BLE001
+            body = {}
+        self._dispatch(POST_ROUTES, body if isinstance(body, dict) else {})
 
     def log_message(self, fmt, *args):
         return
@@ -1067,7 +896,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     srv.daemon_threads = True
-    print(f"gwctl {API_VERSION} listening on http://127.0.0.1:{PORT}", flush=True)
+    print(f"gwctl {VERSION} listening on http://127.0.0.1:{PORT}", flush=True)
     srv.serve_forever()
 
 

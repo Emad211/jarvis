@@ -42,7 +42,8 @@ public final class J {
     }
 
     public static JSONObject obj(JSONObject o, String key) {
-        return o == null ? new JSONObject() : o.optJSONObject(key);
+        JSONObject v = o == null ? null : o.optJSONObject(key);
+        return v == null ? new JSONObject() : v;
     }
 
     public static JSONArray arr(JSONObject o, String key) {

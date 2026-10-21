@@ -1,4 +1,4 @@
 #!/data/data/com.termux/files/usr/bin/sh
-export PATH="$HOME/.local/bin:$PATH"
-export RISH_APPLICATION_ID="com.termux"
-rish -c "content query --uri content://com.android.contacts/data/phones --projection display_name:data1" 2>/dev/null || adb shell content query --uri content://com.android.contacts/data/phones --projection display_name:data1 2>/dev/null
+# Usage: phone-contacts [filter]  — name + number per line.
+. "$HOME/.local/bin/phone-env"
+rish -c "content query --uri content://com.android.contacts/data/phones --projection display_name:data1"   | sed -n 's/.*display_name=\(.*\), data1=\(.*\)/\1\t\2/p' | grep -i -- "${1:-}"

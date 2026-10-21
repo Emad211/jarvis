@@ -23,7 +23,7 @@ echo "==> 2/6 aapt2 link (manifest + resources + assets)"
   -o "$OUT/base.apk" \
   -I "$ANDROID_JAR" \
   --manifest "$PROJ/AndroidManifest.xml" \
-  --min-sdk-version 24 \
+  --min-sdk-version 26 \
   --target-sdk-version 35 \
   -A "$PROJ/assets" \
   --java "$OUT/gen" \
@@ -36,8 +36,9 @@ while IFS= read -r -d '' f; do GEN_ARGS+=("$(cygpath -m "$f")"); done < <(find "
 SRC_ARGS=()
 while IFS= read -r -d '' f; do SRC_ARGS+=("$(cygpath -m "$f")"); done < <(find "$PROJ_MSYS/java" -name '*.java' -print0)
 
-"$JAVA_HOME/bin/javac.exe" -encoding UTF-8 -source 8 -target 8 \
-  -bootclasspath "$ANDROID_JAR" \
+# --release 8 takes java.* from the JDK's Java 8 API: android.jar has no LambdaMetafactory,
+# which javac needs to compile lambdas. d8 desugars them for Android afterwards.
+"$JAVA_HOME/bin/javac.exe" -encoding UTF-8 --release 8 -Xlint:-options \
   -classpath "$ANDROID_JAR" \
   -d "$OUT/classes" \
   "${GEN_ARGS[@]}" \
@@ -46,7 +47,7 @@ while IFS= read -r -d '' f; do SRC_ARGS+=("$(cygpath -m "$f")"); done < <(find "
 echo "==> 4/6 d8 (dex)"
 CLASS_ARGS=()
 while IFS= read -r -d '' f; do CLASS_ARGS+=("$(cygpath -m "$f")"); done < <(find "$PROJ_MSYS/build/classes" -name '*.class' -print0)
-"$BT/d8.bat" --release --min-api 24 \
+"$BT/d8.bat" --release --min-api 26 \
   --lib "$ANDROID_JAR" \
   --output "$OUT/dex" \
   "${CLASS_ARGS[@]}"

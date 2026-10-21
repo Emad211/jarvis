@@ -1,0 +1,78 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""Dump the current screen's UI tree and print it compactly.
+
+Usage:
+    phone-ui                 list visible text/clickable nodes with tap centres
+    phone-ui <needle>        only nodes whose text/desc/id contains <needle>
+    phone-ui --tap <needle>  tap the first matching node (dumps fresh first)
+    phone-ui --raw           print the raw XML path
+
+Each line: `x,y  [clickable] text | content-desc | resource-id`.
+The first line names the foreground package — check it before tapping.
+"""
+import os
+import re
+import subprocess
+import sys
+
+ENV = dict(os.environ, RISH_APPLICATION_ID="com.termux",
+           PATH=os.path.expanduser("~/.local/bin") + ":" + os.environ.get("PATH", ""))
+DEVICE_XML = "/sdcard/Download/.hermes_ui.xml"
+NODE = re.compile(r"<node ([^>]*?)/?>")
+ATTR = re.compile(r'(\w[\w-]*)="([^"]*)"')
+BOUNDS = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
+
+
+def rish(cmd):
+    return subprocess.run(["rish", "-c", cmd], env=ENV, capture_output=True, text=True,
+                          timeout=40)
+
+
+def dump():
+    res = rish(f"uiautomator dump {DEVICE_XML}")
+    if "dumped" not in (res.stdout + res.stderr).lower():
+        sys.exit("uiautomator dump failed: " + (res.stderr or res.stdout).strip())
+    with open(DEVICE_XML, encoding="utf-8", errors="replace") as fh:
+        return fh.read()
+
+
+def nodes(xml):
+    for m in NODE.finditer(xml):
+        a = dict(ATTR.findall(m.group(1)))
+        b = BOUNDS.match(a.get("bounds", ""))
+        if not b:
+            continue
+        x1, y1, x2, y2 = map(int, b.groups())
+        if x2 <= x1 or y2 <= y1:
+            continue
+        label = " | ".join(v for v in (a.get("text", ""), a.get("content-desc", ""),
+                                       a.get("resource-id", "").split("/")[-1]) if v)
+        clickable = a.get("clickable") == "true"
+        if label or clickable:
+            yield (x1 + x2) // 2, (y1 + y2) // 2, clickable, label, a.get("package", "")
+
+
+def main(argv):
+    if argv[:1] == ["--raw"]:
+        dump()
+        print(DEVICE_XML)
+        return
+    tap = argv[:1] == ["--tap"]
+    needle = " ".join(argv[1:] if tap else argv).lower()
+    items = list(nodes(dump()))
+    if items:
+        print("package:", items[0][4])
+    hits = [n for n in items if needle in n[3].lower()] if needle else items
+    if tap:
+        if not hits:
+            sys.exit(f"no node matches '{needle}'")
+        x, y = hits[0][0], hits[0][1]
+        rish(f"input tap {x} {y}")
+        print(f"tapped {x},{y}  {hits[0][3]}")
+        return
+    for x, y, click, label, _pkg in hits[:150]:
+        print(f"{x},{y}  {'[c] ' if click else ''}{label}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

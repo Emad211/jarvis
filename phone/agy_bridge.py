@@ -1,8 +1,21 @@
 #!/data/data/com.termux/files/usr/bin/python3
+"""OpenAI-compatible bridge in front of the Antigravity CLI (`agy`).
+
+    GET  /health                liveness + whether agy answers
+    GET  /v1/models             model ids (from `agy models`, cached)
+    POST /v1/chat/completions   text + image parts, optional SSE
+
+Images are written to ~/.hermes/vision/ and referenced by path in the prompt, because
+`agy -p` only takes text (it reads the file thanks to --dangerously-skip-permissions).
+`agy` is single-session, so calls are serialised with a lock. It answers all at once,
+so "streaming" replays the finished reply as SSE chunks (Hermes always asks for SSE).
+"""
 from __future__ import annotations
 
+import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -12,206 +25,168 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("AGY_BRIDGE_PORT", "8790"))
 TOKEN = os.environ.get("ANTIGRAVITY_BRIDGE_KEY", "antigravity-local")
-AGY = os.environ.get("AGY_CLI_PATH") or shutil.which("agy") or "/data/data/com.termux/files/home/.local/bin/agy"
+AGY = os.environ.get("AGY_CLI_PATH") or shutil.which("agy") or os.path.expanduser("~/.local/bin/agy")
+IMG_DIR = os.path.expanduser("~/.hermes/vision")
 EFFORTS = ("xhigh", "max", "high", "medium", "low")
+IMAGE_EXT = {"png", "jpeg", "jpg", "webp", "gif"}
+FALLBACK_MODELS = [
+    "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
+    "gemini-3.1-pro-high", "gemini-3.1-pro-low",
+    "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium",
+]
 
 _LOCK = threading.Lock()
+_MODELS: dict = {"at": 0.0, "ids": []}
+
 
 def list_models() -> list[str]:
+    if time.time() - _MODELS["at"] < 600 and _MODELS["ids"]:
+        return _MODELS["ids"]
+    ids = []
     try:
-        out = subprocess.run([AGY, "models"], capture_output=True, text=True, timeout=15)
-        models = []
-        for line in out.stdout.splitlines():
-            parts = line.strip().split()
-            if parts:
-                models.append(parts[0])
-        if models:
-            return models
-    except Exception:
+        out = subprocess.run([AGY, "models"], capture_output=True, text=True, timeout=20).stdout
+        ids = [ln.split()[0] for ln in out.splitlines()
+               if ln.strip() and re.match(r"^[a-z0-9][\w.\-]+$", ln.split()[0])]
+    except Exception:  # noqa: BLE001
         pass
-    return [
-        "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
-        "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low",
-        "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low",
-        "gemini-3.1-pro-high", "gemini-3.1-pro-low",
-        "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium",
-    ]
+    _MODELS.update(at=time.time(), ids=ids or FALLBACK_MODELS)
+    return _MODELS["ids"]
 
-def parse_model_effort(raw_model: str) -> tuple[str, str | None]:
-    model = raw_model.strip()
+
+def split_effort(model: str) -> tuple[str, str | None]:
     for eff in EFFORTS:
-        if model.endswith(f"-{eff}"):
-            return model[:-len(eff)-1], eff
+        if model.endswith("-" + eff):
+            return model[: -len(eff) - 1], eff
     return model, None
 
-def run_agy(model: str, effort: str | None, prompt: str) -> tuple[str, int, int]:
-    cmd = [AGY, "-p", prompt, "--model", model, "--output-format", "json", "--dangerously-skip-permissions"]
-    if effort:
-        cmd.extend(["--effort", effort])
+
+def save_image(b64: str, media_type: str) -> str:
+    ext = media_type.split("/")[-1].lower()
+    path = os.path.join(IMG_DIR, f"bridge_{int(time.time() * 1000)}_{uuid.uuid4().hex[:4]}."
+                        f"{ext if ext in IMAGE_EXT else 'png'}")
+    try:
+        with open(path, "wb") as fh:
+            fh.write(base64.b64decode(b64))
+        return f"[Image saved at: {path}]"
+    except Exception as exc:  # noqa: BLE001
+        return f"[image decode error: {exc}]"
+
+
+def part_text(part: dict) -> str:
+    kind = part.get("type")
+    if kind == "text":
+        return part.get("text", "")
+    if kind == "image_url":  # OpenAI: {"image_url": {"url": "data:image/png;base64,..."}}
+        url = part.get("image_url")
+        url = url.get("url", "") if isinstance(url, dict) else str(url or "")
+        if url.startswith("data:image"):
+            header, _, data = url.partition(",")
+            return save_image(data, header[5:].split(";")[0])
+        return f"[Image URL: {url}]" if url else ""
+    if kind == "image":  # Anthropic-style: {"source": {"type": "base64", ...}}
+        src = part.get("source") or {}
+        if src.get("type") == "base64":
+            return save_image(src.get("data", ""), src.get("media_type", "image/png"))
+    return ""
+
+
+def build_prompt(messages: list) -> str:
+    prefix = {"system": "[System Instructions]\n", "user": "User: ", "assistant": "Assistant: ",
+              "tool": "Tool result: "}
+    parts = []
+    for m in messages:
+        content = m.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(filter(None, (part_text(p) for p in content if isinstance(p, dict))))
+        parts.append(prefix.get(m.get("role", "user"), "User: ") + str(content))
+    return "\n\n".join(parts)
+
+
+def run_agy(model: str, prompt: str) -> tuple[str, dict]:
+    name, effort = split_effort(model)
+    cmd = [AGY, "-p", prompt, "--model", name, "--output-format", "json",
+           "--dangerously-skip-permissions"] + (["--effort", effort] if effort else [])
     with _LOCK:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if res.returncode != 0:
-        err = res.stderr or res.stdout or f"agy exit {res.returncode}"
-        raise RuntimeError(err)
+        raise RuntimeError((res.stderr or res.stdout or f"agy exit {res.returncode}").strip()[:500])
     data = json.loads(res.stdout)
     if data.get("status") != "SUCCESS":
         raise RuntimeError(data.get("error") or "agy failed")
-    resp_text = data.get("response", "")
-    usage = data.get("usage", {})
-    p_tok = usage.get("input_tokens", 0)
-    c_tok = usage.get("output_tokens", 0)
-    return resp_text, p_tok, c_tok
+    return data.get("response", "").strip(), data.get("usage") or {}
+
 
 class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path in ("/v1/models", "/models"):
-            mods = list_models()
-            data = {
-                "object": "list",
-                "data": [{"id": m, "object": "model", "owned_by": "antigravity"} for m in mods],
-            }
-            self._send_json(200, data)
-        else:
-            self._send_json(404, {"error": "not found"})
+    def _json(self, status: int, data: dict) -> None:
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self._raw(status, "application/json", body)
 
-    def do_POST(self):
-        if self.path in ("/v1/chat/completions", "/chat/completions"):
-            try:
-                length = int(self.headers.get("content-length", 0))
-                body = json.loads(self.rfile.read(length).decode("utf-8"))
-                model = body.get("model", "gemini-3.8-flash-high")
-                messages = body.get("messages", [])
-                
-                # Build conversation text (supports text + base64/image parts)
-                prompt_parts = []
-                img_dir = os.path.expanduser("~/.hermes/vision")
-                try:
-                    os.makedirs(img_dir, exist_ok=True)
-                except Exception:
-                    img_dir = "/tmp"
-                import base64 as _b64
-                for m in messages:
-                    role = m.get("role", "user")
-                    content = m.get("content", "")
-                    if isinstance(content, list):
-                        txts = []
-                        for c in content:
-                            if not isinstance(c, dict):
-                                continue
-                            ctype = c.get("type")
-                            if ctype == "text":
-                                txts.append(c.get("text", ""))
-                            elif ctype == "image_url":
-                                url = c.get("image_url", {})
-                                u = url.get("url", "") if isinstance(url, dict) else (url if isinstance(url, str) else "")
-                                if isinstance(u, str) and u.startswith("data:image"):
-                                    hdr, _, b64data = u.partition(",")
-                                    ext = "png"
-                                    if ";base64" in u:
-                                        mt = hdr.split(";")[0].split("/")[-1]
-                                        ext = mt if mt in ("png", "jpeg", "jpg", "webp", "gif") else "png"
-                                    ipath = os.path.join(img_dir, f"bridge_{int(time.time()*1000)}_{len(txts)}.{ext}")
-                                    try:
-                                        with open(ipath, "wb") as f:
-                                            f.write(_b64.b64decode(b64data))
-                                        txts.append(f"[Image saved at: {ipath}]")
-                                    except Exception as e:
-                                        txts.append(f"[image decode error: {e}]")
-                            elif ctype == "image":
-                                src = c.get("source", {})
-                                if isinstance(src, dict) and src.get("type") == "base64":
-                                    mt = src.get("media_type", "image/png")
-                                    ext = "png"
-                                    ext = (mt.split("/")[-1] if "/" in mt and mt.split("/")[-1] in ("png","jpeg","jpg","webp","gif") else "png")
-                                    ipath = os.path.join(img_dir, f"bridge_{int(time.time()*1000)}_{len(txts)}.{ext}")
-                                    try:
-                                        with open(ipath, "wb") as f:
-                                            f.write(_b64.b64decode(src.get("data", "")))
-                                        txts.append(f"[Image saved at: {ipath}]")
-                                    except Exception as e:
-                                        txts.append(f"[image decode error: {e}]")
-                        content = " ".join(txts)
-                    if role == "system":
-                        prompt_parts.append(f"[System Instructions]\n{content}\n")
-                    elif role == "user":
-                        prompt_parts.append(f"User: {content}")
-                    elif role == "assistant":
-                        prompt_parts.append(f"Assistant: {content}")
-                prompt = "\n\n".join(prompt_parts)
-                
-                m_name, effort = parse_model_effort(model)
-                resp_text, p_tok, c_tok = run_agy(m_name, effort, prompt)
+    def _raw(self, status: int, ctype: str, body: bytes) -> None:
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
-                want_stream = bool(body.get("stream", False))
-                if not want_stream:
-                    out = {
-                        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                        "object": "chat.completion",
-                        "created": int(time.time()),
-                        "model": model,
-                        "choices": [{
-                            "index": 0,
-                            "message": {"role": "assistant", "content": resp_text.strip()},
-                            "finish_reason": "stop",
-                        }],
-                        "usage": {
-                            "prompt_tokens": p_tok,
-                            "completion_tokens": c_tok,
-                            "total_tokens": p_tok + c_tok,
-                        },
-                    }
-                    self._send_json(200, out)
-                else:
-                    # Emit OpenAI-style SSE chunks: stream the whole answer as
-                    # word-ish deltas then a final [DONE]. Deltas are large but
-                    # valid; clients accumulate them into the full response.
-                    import re as _re
-                    content = resp_text.strip()
-                    nid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-                    gen = int(time.time())
-                    def chunk(delta: str, finish: str | None):
-                        c = {"id": nid, "object": "chat.completion.chunk",
-                             "created": gen, "model": model,
-                             "choices": [{"index": 0, "delta": {"content": delta},
-                                          "finish_reason": finish}]}
-                        return c
-                    # split on whitespace so it streams; include a space after words
-                    pieces = _re.split(r'(\s+)', content) or [""]
-                    payload_chunks = []
-                    for piece in pieces:
-                        if piece == "":
-                            continue
-                        payload_chunks.append("data: " + json.dumps(chunk(piece, None)) + "\n\n")
-                    payload_chunks.append("data: " + json.dumps(chunk("", "stop")) + "\n\n")
-                    payload_chunks.append("data: [DONE]\n\n")
-                    # send SSE with known full length (blocking, but keeps CL correct)
-                    body_b = "".join(payload_chunks).encode("utf-8")
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/event-stream")
-                    self.send_header("Cache-Control", "no-cache")
-                    self.send_header("Content-Length", str(len(body_b)))
-                    self.end_headers()
-                    self.wfile.write(body_b)
-            except Exception as e:
-                self._send_json(500, {"error": {"message": str(e)}})
-        else:
-            self._send_json(404, {"error": "not found"})
+    def _authorized(self) -> bool:
+        auth = self.headers.get("Authorization", "")
+        return not TOKEN or auth in ("Bearer " + TOKEN, TOKEN)
 
-    def _send_json(self, status: int, data: dict):
-        body = json.dumps(data).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0].rstrip("/")
+        if path == "/health":
+            return self._json(200, {"ok": True, "agy": os.path.exists(AGY), "port": PORT})
+        if path in ("/v1/models", "/models"):
+            return self._json(200, {"object": "list", "data": [
+                {"id": m, "object": "model", "owned_by": "antigravity"} for m in list_models()]})
+        return self._json(404, {"error": "not found"})
 
-    def log_message(self, format, *args):
-        pass
+    def do_POST(self):  # noqa: N802
+        if self.path.split("?")[0].rstrip("/") not in ("/v1/chat/completions", "/chat/completions"):
+            return self._json(404, {"error": "not found"})
+        if not self._authorized():
+            return self._json(401, {"error": {"message": "bad bridge key"}})
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            model = body.get("model") or "gemini-3.8-flash-high"
+            text, usage = run_agy(model, build_prompt(body.get("messages") or []))
+        except Exception as exc:  # noqa: BLE001
+            return self._json(502, {"error": {"message": str(exc)}})
+
+        cid, now = f"chatcmpl-{uuid.uuid4().hex[:12]}", int(time.time())
+        p_tok, c_tok = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
+        if not body.get("stream"):
+            return self._json(200, {
+                "id": cid, "object": "chat.completion", "created": now, "model": model,
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": text}}],
+                "usage": {"prompt_tokens": p_tok, "completion_tokens": c_tok,
+                          "total_tokens": p_tok + c_tok}})
+
+        def chunk(delta: str, finish=None) -> str:
+            return "data: " + json.dumps({
+                "id": cid, "object": "chat.completion.chunk", "created": now, "model": model,
+                "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": finish}]},
+                ensure_ascii=False) + "\n\n"
+
+        events = [chunk(p) for p in re.split(r"(\s+)", text) if p]
+        events += [chunk("", "stop"), "data: [DONE]\n\n"]
+        self._raw(200, "text/event-stream", "".join(events).encode("utf-8"))
+
+    def log_message(self, fmt, *args):
+        return
+
 
 def main():
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"Antigravity bridge listening on 127.0.0.1:{PORT}")
-    server.serve_forever()
+    os.makedirs(IMG_DIR, exist_ok=True)
+    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    srv.daemon_threads = True
+    print(f"agy bridge on http://127.0.0.1:{PORT}  (agy={AGY})", flush=True)
+    srv.serve_forever()
+
 
 if __name__ == "__main__":
     main()

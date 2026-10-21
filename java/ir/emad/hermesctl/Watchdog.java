@@ -12,63 +12,51 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.net.Uri;
-import android.os.Build;
 
 import org.json.JSONObject;
 
 /**
- * Background watchdog: pings the gwctl server every ~15 min and raises a
- * notification the moment the gateway stops being healthy.
+ * Background watchdog: checks the bot every ~15 min and notifies when it goes down or comes
+ * back. While it stays down it reminds at most every REMIND_MS, not on every run.
  *
- * JobScheduler (not a foreground Service) on purpose: a persistent foreground
- * service on Android 14+ needs a declared FGS type and a visible notification at
- * all times, which drains the phone. A periodic job costs nothing while idle.
+ * JobScheduler (not a foreground service) on purpose: an Android 14+ foreground service needs
+ * a declared type and a permanent notification, which costs battery; an idle job costs nothing.
  */
 public class Watchdog extends JobService {
 
     private static final int JOB_ID = 8871;
-    private static final String CHANNEL = "hermes_status";
-    private static final String PREFS = "hcontrol";
     private static final int NOTIF_ID = 4401;
+    private static final String CHANNEL = "hermes_status";
+    private static final long REMIND_MS = 3 * 60 * 60 * 1000L;
 
     public static void schedule(Context ctx) {
-        try {
-            JobScheduler js = (JobScheduler) ctx.getSystemService(Context.JOB_SCHEDULER_SERVICE);
-            if (js == null) {
-                return;
-            }
-            JobInfo.Builder b = new JobInfo.Builder(JOB_ID,
-                    new ComponentName(ctx, Watchdog.class))
-                    .setPeriodic(15 * 60 * 1000L)
-                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                    .setPersisted(true);
-            js.schedule(b.build());
-        } catch (Exception ignored) {
-            // scheduling is best-effort; the app still works when opened manually
+        JobScheduler js = ctx.getSystemService(JobScheduler.class);
+        if (js == null || js.getPendingJob(JOB_ID) != null) {
+            return;
         }
+        js.schedule(new JobInfo.Builder(JOB_ID, new ComponentName(ctx, Watchdog.class))
+                .setPeriodic(15 * 60 * 1000L)
+                .setPersisted(true)
+                .build());
     }
 
     @Override
-    public boolean onStartJob(final JobParameters params) {
-        final Context ctx = this;
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                boolean healthy = false;
-                String detail = "";
-                try {
-                    JSONObject status = Api.execForJob("/status", 9000);
-                    String overall = J.str(status, "overall", "");
-                    String tg = J.str(status, "telegram", "");
-                    healthy = "online".equals(overall) && "connected".equals(tg);
-                    detail = overall + " · تلگرام: " + tg;
-                } catch (Exception e) {
-                    detail = "سرویس کنترل جواب نداد";
-                }
-                notifyIfChanged(ctx, healthy, detail);
-                jobFinished(params, false);
+    public boolean onStartJob(JobParameters params) {
+        new Thread(() -> {
+            boolean healthy;
+            String detail;
+            try {
+                JSONObject st = Api.getBlocking("/status", 10000);
+                String overall = J.str(st, "overall", "");
+                String tg = J.str(st, "telegram", "");
+                healthy = "online".equals(overall) && "connected".equals(tg);
+                detail = "ربات: " + overall + " · تلگرام: " + HomeScreen.telegramLabel(tg);
+            } catch (Exception e) {
+                healthy = false;
+                detail = "سرویس کنترل جواب نداد (ترموکس خوابیده؟)";
             }
+            report(healthy, detail);
+            jobFinished(params, false);
         }).start();
         return true;
     }
@@ -78,53 +66,50 @@ public class Watchdog extends JobService {
         return true;
     }
 
-    private void notifyIfChanged(Context ctx, boolean healthy, String detail) {
-        SharedPreferences sp = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        boolean lastHealthy = sp.getBoolean("last_healthy", true);
-        sp.edit().putBoolean("last_healthy", healthy).apply();
-
-        NotificationManager nm = (NotificationManager) ctx.getSystemService(
-                Context.NOTIFICATION_SERVICE);
+    private void report(boolean healthy, String detail) {
+        SharedPreferences sp = getSharedPreferences("watchdog", MODE_PRIVATE);
+        boolean wasHealthy = sp.getBoolean("healthy", true);
+        long lastAlert = sp.getLong("last_alert", 0);
+        long now = System.currentTimeMillis();
+        NotificationManager nm = getSystemService(NotificationManager.class);
         if (nm == null) {
             return;
         }
-        if (Build.VERSION.SDK_INT >= 26) {
-            NotificationChannel ch = new NotificationChannel(CHANNEL,
-                    "وضعیت هرمس", NotificationManager.IMPORTANCE_HIGH);
-            ch.setDescription("اعلان قطع شدن ربات");
-            nm.createNotificationChannel(ch);
-        }
+        nm.createNotificationChannel(new NotificationChannel(CHANNEL, "وضعیت هرمس",
+                NotificationManager.IMPORTANCE_HIGH));
 
         if (healthy) {
-            if (!lastHealthy) {
-                post(ctx, nm, "ربات دوباره وصل شد ✓", detail, Ui.GREEN);
+            if (!wasHealthy) {
+                post(nm, "ربات دوباره وصل شد", detail);
             }
+            sp.edit().putBoolean("healthy", true).apply();
             return;
         }
-        post(ctx, nm, "ربات هرمس قطع است", detail + " — برای روشن کردن لمس کن", Ui.RED);
+        if (wasHealthy || now - lastAlert > REMIND_MS) {
+            post(nm, "ربات هرمس قطع است", detail + " — برای باز کردن لمس کن");
+            sp.edit().putLong("last_alert", now).apply();
+        }
+        sp.edit().putBoolean("healthy", false).apply();
     }
 
-    private void post(Context ctx, NotificationManager nm, String title, String body,
-                      int color) {
-        Intent open = new Intent(ctx, MainActivity.class);
-        open.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        PendingIntent pi = PendingIntent.getActivity(ctx, 0, open,
+    private void post(NotificationManager nm, String title, String body) {
+        Intent open = new Intent(this, MainActivity.class)
+                .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent pi = PendingIntent.getActivity(this, 0, open,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-
-        Notification.Builder b = Build.VERSION.SDK_INT >= 26
-                ? new Notification.Builder(ctx, CHANNEL)
-                : new Notification.Builder(ctx);
-        b.setContentTitle(title)
+        Notification n = new Notification.Builder(this, CHANNEL)
+                .setContentTitle(title)
                 .setContentText(body)
+                .setStyle(new Notification.BigTextStyle().bigText(body))
                 .setSmallIcon(android.R.drawable.stat_sys_warning)
-                .setColor(color)
+                .setColor(Ui.ACCENT)
                 .setAutoCancel(true)
                 .setContentIntent(pi)
-                .setStyle(new Notification.BigTextStyle().bigText(body));
+                .build();
         try {
-            nm.notify(NOTIF_ID, b.build());
-        } catch (Exception ignored) {
-            // notifications denied (Android 13+ runtime permission)
+            nm.notify(NOTIF_ID, n);
+        } catch (SecurityException ignored) {
+            // notification permission denied (Android 13+)
         }
     }
 }

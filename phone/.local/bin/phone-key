@@ -1,2 +1,10 @@
 #!/data/data/com.termux/files/usr/bin/sh
-$HOME/.local/bin/rish -c "input keyevent $1"
+# Usage: phone-key <keycode|name>  — names: back home recents enter delete paste menu power notifications
+. "$HOME/.local/bin/phone-env"
+case "$1" in
+  back) k=4 ;; home) k=3 ;; recents) k=187 ;; enter) k=66 ;; delete) k=67 ;;
+  paste) k=279 ;; menu) k=82 ;; power) k=26 ;; notifications) k=83 ;;
+  ''|*[!0-9]*) echo "usage: phone-key <code|back|home|recents|enter|delete|paste|menu|power|notifications>" >&2; exit 2 ;;
+  *) k=$1 ;;
+esac
+rish -c "input keyevent $k"

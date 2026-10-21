@@ -1,8 +1,10 @@
 #!/data/data/com.termux/files/usr/bin/sh
-PKG="$1"
-adb -s 127.0.0.1:5555 shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
-echo "Opened $PKG"
-EOF
-
-chmod +x $HOME/.local/bin/phone-screenshot $HOME/.local/bin/phone-open
-ls -l $HOME/.local/bin/phone-*
+# Usage: phone-open <package>  — launch an app's main activity.
+. "$HOME/.local/bin/phone-env"
+[ -n "$1" ] || { echo "usage: phone-open <package>" >&2; exit 2; }
+if rish -c "monkey -p '$1' -c android.intent.category.LAUNCHER 1" >/dev/null 2>&1; then
+  echo "opened $1"
+else
+  echo "failed to open $1" >&2
+  exit 1
+fi

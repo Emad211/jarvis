@@ -1,0 +1,11 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Usage: phone-type "text"  — types into the focused field.
+# `input text` only handles plain ASCII, so non-ASCII (Persian) and shell-quote characters
+# go through the clipboard + paste instead.
+. "$HOME/.local/bin/phone-env"
+[ -n "$1" ] || { echo "usage: phone-type <text>" >&2; exit 2; }
+if printf '%s' "$1" | LC_ALL=C grep -q "[^ -~]\|['\"\`\\\\\$]"; then
+  printf '%s' "$1" | termux-clipboard-set && rish -c "input keyevent 279"
+else
+  rish -c "input text '$(printf '%s' "$1" | sed 's/ /%s/g')'"
+fi

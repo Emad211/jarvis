@@ -1,0 +1,9 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Usage: phone-swipe up|down|left|right   or   phone-swipe X1 Y1 X2 Y2 [ms]
+. "$HOME/.local/bin/phone-env"
+case "$1" in
+  up) set -- 540 1700 540 700 300 ;; down) set -- 540 700 540 1700 300 ;;
+  left) set -- 900 1200 180 1200 300 ;; right) set -- 180 1200 900 1200 300 ;;
+esac
+[ -n "$4" ] || { echo "usage: phone-swipe up|down|left|right | X1 Y1 X2 Y2 [ms]" >&2; exit 2; }
+rish -c "input swipe $1 $2 $3 $4 ${5:-300}"

@@ -1,232 +1,275 @@
 package ir.emad.hermesctl;
 
 import android.content.Context;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
-import android.content.res.ColorStateList;
+import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-/** Design system: palette, type, cards, chips, pills, buttons. */
+/** Design system: palette, type scale, surfaces and the few widgets every screen shares. */
 public final class Ui {
 
-    public static final int BG = Color.parseColor("#080D17");
-    public static final int SURFACE = Color.parseColor("#111A2B");
-    public static final int SURFACE_2 = Color.parseColor("#18243A");
-    public static final int STROKE = Color.parseColor("#223049");
-    public static final int TEXT = Color.parseColor("#E8EEF9");
-    public static final int DIM = Color.parseColor("#93A4C0");
-    public static final int FAINT = Color.parseColor("#5C6C87");
-    public static final int ACCENT = Color.parseColor("#38BDF8");
-    public static final int ACCENT_2 = Color.parseColor("#818CF8");
-    public static final int GREEN = Color.parseColor("#34D399");
-    public static final int AMBER = Color.parseColor("#FBBF24");
-    public static final int RED = Color.parseColor("#F87171");
-    public static final int PINK = Color.parseColor("#F472B6");
+    // Palette: deep slate background, one cool accent, semantic status colours.
+    public static final int BG = 0xFF0B0F17;
+    public static final int SURFACE = 0xFF131A26;
+    public static final int SURFACE_2 = 0xFF1B2433;
+    public static final int STROKE = 0xFF253147;
+    public static final int TEXT = 0xFFEEF2F8;
+    public static final int DIM = 0xFF9AA7BC;
+    public static final int FAINT = 0xFF64718A;
+    public static final int ACCENT = 0xFF8AA4FF;
+    public static final int TEAL = 0xFF5EEAD4;
+    public static final int GREEN = 0xFF4ADE80;
+    public static final int AMBER = 0xFFFBBF24;
+    public static final int RED = 0xFFF87171;
+    public static final int ON_ACCENT = 0xFF0B1022;
 
-    public static Typeface REG;
-    public static Typeface BOLD;
+    public static Typeface REG = Typeface.SANS_SERIF;
+    public static Typeface BOLD = Typeface.DEFAULT_BOLD;
 
     private Ui() {
     }
 
     public static void init(Context ctx) {
-        if (REG != null) {
-            return;
-        }
         try {
             REG = Typeface.createFromAsset(ctx.getAssets(), "fonts/vazirmatn_regular.ttf");
             BOLD = Typeface.createFromAsset(ctx.getAssets(), "fonts/vazirmatn_bold.ttf");
-        } catch (Exception e) {
-            REG = Typeface.SANS_SERIF;
-            BOLD = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD);
+        } catch (Exception ignored) {
+            // system sans keeps working
         }
     }
 
     public static int dp(Context ctx, float v) {
-        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
-                ctx.getResources().getDisplayMetrics());
+        return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
+                ctx.getResources().getDisplayMetrics()));
     }
 
-    public static GradientDrawable round(int color, int radiusDp, Context ctx) {
+    public static int alpha(int color, int a) {
+        return Color.argb(a, Color.red(color), Color.green(color), Color.blue(color));
+    }
+
+    // ------------------------------------------------------------- drawables --
+    public static GradientDrawable round(Context ctx, int color, float radiusDp) {
         GradientDrawable d = new GradientDrawable();
         d.setColor(color);
         d.setCornerRadius(dp(ctx, radiusDp));
         return d;
     }
 
-    public static GradientDrawable roundStroke(int color, int strokeColor, int radiusDp,
-                                              Context ctx) {
-        GradientDrawable d = round(color, radiusDp, ctx);
-        d.setStroke(dp(ctx, 1), strokeColor);
+    public static GradientDrawable outline(Context ctx, int fill, int stroke, float radiusDp) {
+        GradientDrawable d = round(ctx, fill, radiusDp);
+        d.setStroke(Math.max(1, dp(ctx, 1)), stroke);
         return d;
     }
 
-    public static GradientDrawable gradient(int from, int to, int radiusDp, Context ctx) {
-        GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+    public static GradientDrawable gradient(Context ctx, int from, int to, float radiusDp) {
+        GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TR_BL,
                 new int[]{from, to});
         d.setCornerRadius(dp(ctx, radiusDp));
         return d;
     }
 
-    public static TextView text(Context ctx, String value, float sp, int color, boolean bold) {
-        TextView t = new TextView(ctx);
-        t.setText(value);
-        t.setTextSize(sp);
-        t.setTextColor(color);
-        t.setTypeface(bold ? BOLD : REG);
-        t.setIncludeFontPadding(false);
-        return t;
+    public static Drawable ripple(Context ctx, Drawable base, int tint) {
+        return new RippleDrawable(ColorStateList.valueOf(alpha(tint, 60)), base,
+                base == null ? round(ctx, Color.WHITE, 14) : null);
     }
 
-    /** Card container with padding, rounded corners and a hairline border. */
-    public static LinearLayout card(Context ctx) {
-        LinearLayout box = new LinearLayout(ctx);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(ctx, 16), dp(ctx, 15), dp(ctx, 16), dp(ctx, 15));
-        box.setBackground(roundStroke(SURFACE, STROKE, 20, ctx));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dp(ctx, 12);
-        box.setLayoutParams(lp);
-        box.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
-        return box;
-    }
-
-    public static TextView sectionTitle(Context ctx, String title) {
-        TextView t = text(ctx, title, 13.5f, DIM, true);
-        t.setPadding(dp(ctx, 4), dp(ctx, 6), dp(ctx, 4), dp(ctx, 9));
-        return t;
-    }
-
+    // ---------------------------------------------------------------- layout --
     public static LinearLayout row(Context ctx) {
         LinearLayout r = new LinearLayout(ctx);
         r.setOrientation(LinearLayout.HORIZONTAL);
         r.setGravity(Gravity.CENTER_VERTICAL);
-        r.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
         return r;
     }
 
     public static LinearLayout col(Context ctx) {
         LinearLayout c = new LinearLayout(ctx);
         c.setOrientation(LinearLayout.VERTICAL);
-        c.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
         return c;
     }
 
-    public static LinearLayout.LayoutParams lp(int w, int h, Context ctx) {
-        return new LinearLayout.LayoutParams(w, h);
+    public static LinearLayout.LayoutParams wrap() {
+        return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
     }
 
-    public static LinearLayout.LayoutParams weighted(Context ctx, float weight) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, weight);
+    public static LinearLayout.LayoutParams fill() {
+        return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+    }
+
+    public static LinearLayout.LayoutParams weight(float w) {
+        return new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, w);
+    }
+
+    public static LinearLayout.LayoutParams margins(LinearLayout.LayoutParams lp, Context ctx,
+                                                    float start, float top, float end, float bottom) {
+        lp.setMarginStart(dp(ctx, start));
+        lp.topMargin = dp(ctx, top);
+        lp.setMarginEnd(dp(ctx, end));
+        lp.bottomMargin = dp(ctx, bottom);
         return lp;
     }
 
-    /** Small rounded status pill, e.g. "وصل" in green. */
+    public static View space(Context ctx, float w, float h) {
+        View v = new View(ctx);
+        v.setLayoutParams(new LinearLayout.LayoutParams(dp(ctx, w), dp(ctx, h)));
+        return v;
+    }
+
+    // ------------------------------------------------------------------ text --
+    public static TextView text(Context ctx, CharSequence value, float sp, int color, boolean bold) {
+        TextView t = new TextView(ctx);
+        t.setText(value);
+        t.setTextSize(sp);
+        t.setTextColor(color);
+        t.setTypeface(bold ? BOLD : REG);
+        t.setIncludeFontPadding(false);
+        t.setLineSpacing(dp(ctx, 2), 1f);
+        return t;
+    }
+
+    /** Latin/technical text (model ids, keys, logs) laid out left-to-right. */
+    public static TextView ltr(Context ctx, CharSequence value, float sp, int color, boolean bold) {
+        TextView t = text(ctx, value, sp, color, bold);
+        t.setTextDirection(View.TEXT_DIRECTION_LTR);
+        return t;
+    }
+
+    public static TextView mono(Context ctx, CharSequence value, float sp, int color) {
+        TextView t = ltr(ctx, value, sp, color, false);
+        t.setTypeface(Typeface.MONOSPACE);
+        t.setGravity(Gravity.START);
+        t.setTextIsSelectable(true);
+        return t;
+    }
+
+    public static TextView oneLine(TextView t) {
+        t.setSingleLine(true);
+        t.setEllipsize(TextUtils.TruncateAt.END);
+        return t;
+    }
+
+    public static TextView section(Context ctx, String title) {
+        TextView t = text(ctx, title, 13f, DIM, true);
+        t.setPadding(dp(ctx, 6), dp(ctx, 18), dp(ctx, 6), dp(ctx, 8));
+        return t;
+    }
+
+    // --------------------------------------------------------------- widgets --
+    /** Rounded surface with padding; the basic building block of every screen. */
+    public static LinearLayout card(Context ctx) {
+        LinearLayout box = col(ctx);
+        box.setPadding(dp(ctx, 16), dp(ctx, 14), dp(ctx, 16), dp(ctx, 14));
+        box.setBackground(outline(ctx, SURFACE, STROKE, 22));
+        box.setLayoutParams(margins(fill(), ctx, 0, 0, 0, 10));
+        return box;
+    }
+
+    /** List row: optional leading icon, title + subtitle, trailing view. */
+    public static LinearLayout listRow(Context ctx, Icon icon, String title, CharSequence subtitle,
+                                       View trailing, View.OnClickListener onClick) {
+        LinearLayout r = row(ctx);
+        r.setPadding(dp(ctx, 4), dp(ctx, 10), dp(ctx, 4), dp(ctx, 10));
+        if (icon != null) {
+            r.addView(icon, margins(new LinearLayout.LayoutParams(dp(ctx, 36), dp(ctx, 36)),
+                    ctx, 0, 0, 12, 0));
+        }
+        LinearLayout texts = col(ctx);
+        texts.addView(oneLine(text(ctx, title, 14f, TEXT, true)));
+        if (subtitle != null && subtitle.length() > 0) {
+            TextView s = text(ctx, subtitle, 11.5f, DIM, false);
+            s.setPadding(0, dp(ctx, 4), 0, 0);
+            texts.addView(s);
+        }
+        r.addView(texts, weight(1f));
+        if (trailing != null) {
+            r.addView(trailing, margins(wrap(), ctx, 8, 0, 0, 0));
+        }
+        if (onClick != null) {
+            r.setBackground(ripple(ctx, null, ACCENT));
+            r.setOnClickListener(onClick);
+        }
+        return r;
+    }
+
     public static TextView pill(Context ctx, String label, int color) {
         TextView t = text(ctx, label, 11f, color, true);
         t.setPadding(dp(ctx, 10), dp(ctx, 5), dp(ctx, 10), dp(ctx, 5));
-        GradientDrawable bg = round(withAlpha(color, 34), 30, ctx);
-        bg.setStroke(dp(ctx, 1), withAlpha(color, 90));
-        t.setBackground(bg);
+        t.setBackground(round(ctx, alpha(color, 36), 20));
         return t;
     }
 
-    public static int withAlpha(int color, int alpha) {
-        return Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color));
+    public static View dot(Context ctx, int color, float sizeDp) {
+        View v = new View(ctx);
+        v.setBackground(round(ctx, color, sizeDp));
+        v.setLayoutParams(new LinearLayout.LayoutParams(dp(ctx, sizeDp), dp(ctx, sizeDp)));
+        return v;
     }
 
-    /** Filled action button. */
-    public static TextView button(Context ctx, String label, int color, View.OnClickListener onClick) {
-        TextView t = text(ctx, label, 14f, Color.parseColor("#0A1020"), true);
+    /** Filled primary button. */
+    public static TextView button(Context ctx, String label, int color, View.OnClickListener l) {
+        TextView t = text(ctx, label, 14f, ON_ACCENT, true);
         t.setGravity(Gravity.CENTER);
-        t.setPadding(dp(ctx, 14), dp(ctx, 13), dp(ctx, 14), dp(ctx, 13));
-        t.setBackground(new RippleDrawable(ColorStateList.valueOf(withAlpha(color, 90)),
-                round(color, 14, ctx), null));
-        t.setOnClickListener(onClick);
-        t.setClickable(true);
+        t.setPadding(dp(ctx, 16), dp(ctx, 13), dp(ctx, 16), dp(ctx, 13));
+        t.setBackground(ripple(ctx, round(ctx, color, 16), Color.WHITE));
+        t.setOnClickListener(l);
         return t;
     }
 
-    /** Subtle (outline) action button. */
-    public static TextView buttonGhost(Context ctx, String label, int color,
-                                       View.OnClickListener onClick) {
+    /** Tonal secondary button. */
+    public static TextView tonal(Context ctx, String label, int color, View.OnClickListener l) {
         TextView t = text(ctx, label, 13.5f, color, true);
         t.setGravity(Gravity.CENTER);
-        t.setPadding(dp(ctx, 12), dp(ctx, 12), dp(ctx, 12), dp(ctx, 12));
-        GradientDrawable bg = round(withAlpha(color, 26), 14, ctx);
-        bg.setStroke(dp(ctx, 1), withAlpha(color, 110));
-        t.setBackground(new RippleDrawable(ColorStateList.valueOf(withAlpha(color, 60)), bg, null));
-        t.setOnClickListener(onClick);
-        t.setClickable(true);
+        t.setPadding(dp(ctx, 14), dp(ctx, 11), dp(ctx, 14), dp(ctx, 11));
+        t.setBackground(ripple(ctx, round(ctx, alpha(color, 30), 14), color));
+        t.setOnClickListener(l);
         return t;
     }
 
-    public static TextView chip(Context ctx, String label, boolean active, View.OnClickListener onClick) {
-        TextView t = text(ctx, label, 12f, active ? Color.parseColor("#08111F") : DIM, true);
-        t.setPadding(dp(ctx, 12), dp(ctx, 8), dp(ctx, 12), dp(ctx, 8));
-        t.setBackground(active ? round(ACCENT, 20, ctx) : roundStroke(SURFACE_2, STROKE, 20, ctx));
-        t.setOnClickListener(onClick);
-        t.setClickable(true);
+    /** Small square icon button. */
+    public static Icon iconButton(Context ctx, int glyph, int color, View.OnClickListener l) {
+        Icon i = new Icon(ctx, glyph, color);
+        int p = dp(ctx, 8);
+        i.setPadding(p, p, p, p);
+        i.setBackground(ripple(ctx, round(ctx, alpha(color, 22), 12), color));
+        i.setOnClickListener(l);
+        i.setLayoutParams(new LinearLayout.LayoutParams(dp(ctx, 38), dp(ctx, 38)));
+        return i;
+    }
+
+    public static TextView chip(Context ctx, String label, boolean active, View.OnClickListener l) {
+        TextView t = text(ctx, label, 12.5f, active ? ON_ACCENT : DIM, true);
+        t.setPadding(dp(ctx, 14), dp(ctx, 8), dp(ctx, 14), dp(ctx, 8));
+        t.setBackground(ripple(ctx, active ? round(ctx, ACCENT, 20)
+                : outline(ctx, SURFACE_2, STROKE, 20), ACCENT));
+        t.setOnClickListener(l);
         return t;
     }
 
-    /** Horizontal scroller so chip strips never overflow the screen. */
-    public static android.widget.HorizontalScrollView hscroll(Context ctx, View child) {
-        android.widget.HorizontalScrollView s = new android.widget.HorizontalScrollView(ctx);
+    public static HorizontalScrollView chips(Context ctx, LinearLayout strip) {
+        HorizontalScrollView s = new HorizontalScrollView(ctx);
         s.setHorizontalScrollBarEnabled(false);
-        s.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
-        s.addView(child);
+        s.addView(strip);
         return s;
     }
 
     public static void divider(Context ctx, LinearLayout parent) {
         View v = new View(ctx);
-        v.setBackgroundColor(STROKE);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(ctx, 0.7f)));
-        lp.topMargin = dp(ctx, 10);
-        lp.bottomMargin = dp(ctx, 10);
-        parent.addView(v, lp);
-    }
-
-    public static String humanDuration(Long seconds) {
-        if (seconds == null || seconds < 0) {
-            return "—";
-        }
-        long s = seconds;
-        if (s < 60) {
-            return s + " ثانیه";
-        }
-        long m = s / 60;
-        if (m < 60) {
-            return m + " دقیقه";
-        }
-        long h = m / 60;
-        if (h < 24) {
-            return h + " ساعت و " + (m % 60) + " دقیقه";
-        }
-        return (h / 24) + " روز و " + (h % 24) + " ساعت";
-    }
-
-    public static String humanSize(long bytes) {
-        double v = bytes;
-        String[] units = {"بایت", "کیلوبایت", "مگابایت", "گیگابایت"};
-        int i = 0;
-        while (v >= 1024 && i < units.length - 1) {
-            v /= 1024;
-            i++;
-        }
-        return String.format(java.util.Locale.US, i >= 2 ? "%.1f %s" : "%.0f %s", v, units[i]);
+        v.setBackgroundColor(alpha(STROKE, 200));
+        parent.addView(v, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                Math.max(1, dp(ctx, 0.6f))));
     }
 
     public static EditText input(Context ctx, String hint) {
@@ -236,9 +279,38 @@ public final class Ui {
         e.setHintTextColor(FAINT);
         e.setTypeface(REG);
         e.setTextSize(14f);
-        e.setBackground(roundStroke(SURFACE_2, STROKE, 12, ctx));
-        e.setPadding(dp(ctx, 12), dp(ctx, 12), dp(ctx, 12), dp(ctx, 12));
-        e.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+        e.setBackground(outline(ctx, SURFACE_2, STROKE, 14));
+        e.setPadding(dp(ctx, 14), dp(ctx, 12), dp(ctx, 14), dp(ctx, 12));
         return e;
+    }
+
+    // ------------------------------------------------------------ formatting --
+    public static String duration(long seconds) {
+        if (seconds < 0) {
+            return "—";
+        }
+        long m = seconds / 60;
+        long h = m / 60;
+        if (seconds < 60) {
+            return seconds + " ثانیه";
+        }
+        if (m < 60) {
+            return m + " دقیقه";
+        }
+        if (h < 24) {
+            return h + " ساعت " + (m % 60) + " دقیقه";
+        }
+        return (h / 24) + " روز " + (h % 24) + " ساعت";
+    }
+
+    public static String size(long bytes) {
+        double v = bytes;
+        String[] units = {"B", "KB", "MB", "GB"};
+        int i = 0;
+        while (v >= 1024 && i < units.length - 1) {
+            v /= 1024;
+            i++;
+        }
+        return String.format(java.util.Locale.US, i >= 2 ? "%.1f %s" : "%.0f %s", v, units[i]);
     }
 }
