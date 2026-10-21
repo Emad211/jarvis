@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/sh
-# Usage: phone-contacts [filter]  — name + number per line.
+# Usage: phone-contacts [filter]  — "name<TAB>number" per line.
 . "$HOME/.local/bin/phone-env"
-rish -c "content query --uri content://com.android.contacts/data/phones --projection display_name:data1"   | sed -n 's/.*display_name=\(.*\), data1=\(.*\)/\1\t\2/p' | grep -i -- "${1:-}"
+rish -c "content query --uri content://com.android.contacts/data/phones --projection display_name:data1" 2>&1 \
+  | sed -n 's/^Row: [0-9]* display_name=\(.*\), data1=\(.*\)$/\1\t\2/p' \
+  | grep -i -- "${1:-}"
