@@ -1,0 +1,8 @@
+#!/data/data/com.termux/files/usr/bin/sh
+PKG="$1"
+adb -s 127.0.0.1:5555 shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+echo "Opened $PKG"
+EOF
+
+chmod +x $HOME/.local/bin/phone-screenshot $HOME/.local/bin/phone-open
+ls -l $HOME/.local/bin/phone-*

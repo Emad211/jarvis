@@ -1,0 +1,2 @@
+#!/data/data/com.termux/files/usr/bin/sh
+$HOME/.local/bin/rish -c "input tap $1 $2"

@@ -1,0 +1,104 @@
+_config_version: 39
+approvals:
+  destructive_slash_confirm: false
+auxiliary:
+  free_only: true
+command_allowlist:
+- script execution via heredoc
+- delete in root path
+- force kill processes
+- command parser limit or malformed executable payload
+- execute_code
+- script execution via -e/-c flag
+compression:
+  threshold_tokens: 300000
+model:
+  aliases:
+    dsflash: agentrouter/deepseek-v4-flash
+    v4flash: agentrouter/deepseek-v4-flash
+  default: deepseek-v4-flash
+  default_headers:
+    User-Agent: claude-cli/1.0.0 (external, cli)
+  provider: agentrouter
+  api_mode: anthropic_messages
+onboarding:
+  seen:
+    busy_input_prompt: true
+platforms:
+  telegram:
+    enabled: true
+    home_channel:
+      chat_id: '6961356707'
+      name: Emad Karimi
+      platform: telegram
+      user_id: '6961356707'
+plugins:
+  disabled: []
+  enabled: []
+  entries:
+    antigravity-oauth:
+      allow_tool_override: false
+providers:
+  agentrouter:
+    name: AgentRouter
+    base_url: https://agentrouter.org
+    api_mode: anthropic_messages
+    key_env: AGENTROUTER_API_KEY
+    model: deepseek-v4-flash
+    context_length: 1000000
+    extra_headers:
+      User-Agent: claude-cli/1.0.0 (external, cli)
+    models:
+      deepseek-v4-flash:
+        display_name: DeepSeek V4 Flash
+        context_length: 1000000
+        max_tokens: 384000
+        supports_tools: true
+        supports_vision: false
+  antigravity:
+    api_key: antigravity-local
+    base_url: http://127.0.0.1:8790/v1
+    default_model: gemini-3.8-flash-high
+    models:
+    - gemini-3.8-flash-high
+    - gemini-3.8-flash-medium
+    - gemini-3.8-flash-low
+    - gemini-3.7-flash-high
+    - gemini-3.7-flash-medium
+    - gemini-3.7-flash-low
+    - gemini-3.6-flash-high
+    - gemini-3.6-flash-medium
+    - gemini-3.6-flash-low
+    - gemini-3.1-pro-high
+    - gemini-3.1-pro-low
+    - claude-sonnet-4-6
+    - claude-opus-4-6-thinking
+    - gpt-oss-120b-medium
+    name: Google Antigravity
+quick_commands:
+  flash:
+    description: DeepSeek V4 Flash (AgentRouter)
+    type: alias
+    target: /model deepseek-v4-flash --provider agentrouter
+stt:
+  language: fa
+  provider: elevenlabs
+timezone: Asia/Tehran
+tts:
+  elevenlabs:
+    model_id: eleven_v4_turbo
+    voice_id: XzieuK0bwYWT9Kl1LhLs
+  provider: elevenlabs
+voice:
+  auto_tts: false
+streaming:
+  enabled: true
+  transport: auto
+  edit_interval: 1.2
+  buffer_threshold: 24
+  cursor: ' ▉'
+  fresh_final_after_seconds: 0.0
+display:
+  streaming: true
+  show_reasoning: false
+  tool_progress: all

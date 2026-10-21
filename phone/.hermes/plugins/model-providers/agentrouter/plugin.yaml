@@ -1,0 +1,5 @@
+name: agentrouter-provider
+kind: model-provider
+version: 1.0.0
+description: AgentRouter (agentrouter.org) provider with Claude Code client fingerprint
+author: Emad Karimi

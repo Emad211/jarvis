@@ -1,0 +1,12 @@
+build/
+dist/
+*.apk
+keystore.jks
+shots/
+.claude/
+# secrets — never commit
+phone/.hermes/.env
+phone/.hermes/auth.json
+phone/.hermes/memories/
+phone/.hermes/custom_endpoints.json
+**/__pycache__/

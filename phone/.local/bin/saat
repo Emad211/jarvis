@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+import datetime
+import zoneinfo
+
+def gregorian_to_jalali(gy, gm, gd):
+    g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    if gy > 1600:
+        jy = 979
+        gy -= 1600
+    else:
+        jy = 0
+        gy -= 621
+    gy2 = gy if gm > 2 else gy - 1
+    days = 365 * gy + (gy2 + 3) // 4 - (gy2 + 99) // 100 + (gy2 + 399) // 400 - 80 + gd + g_d_m[gm - 1]
+    jy += 33 * (days // 12053)
+    days %= 12053
+    jy += 4 * (days // 1461)
+    days %= 1461
+    if days > 365:
+        jy += (days - 1) // 365
+        days = (days - 1) % 365
+    if days < 186:
+        jm = 1 + days // 31
+        jd = 1 + days % 31
+    else:
+        jm = 7 + (days - 186) // 30
+        jd = 1 + (days - 186) % 30
+    return jy, jm, jd
+
+tz = zoneinfo.ZoneInfo("Asia/Tehran")
+now = datetime.datetime.now(tz)
+jy, jm, jd = gregorian_to_jalali(now.year, now.month, now.day)
+months = ['', 'فروردین', 'اردیبهشت', 'خرداد', 'تیر', 'مرداد', 'شهریور', 'مهر', 'آبان', 'آذر', 'دی', 'بهمن', 'اسفند']
+weekdays = ['دوشنبه', 'سه‌شنبه', 'چهارشنبه', 'پنج‌شنبه', 'جمعه', 'شنبه', 'یکشنبه']
+
+hour = now.hour
+minute = now.minute
+second = now.second
+
+# Time of day in Persian
+if 0 <= hour < 4:
+    part = "بامداد"
+elif 4 <= hour < 12:
+    part = "صبح"
+elif 12 <= hour < 16:
+    part = "بعدازظهر"
+elif 16 <= hour < 20:
+    part = "عصر"
+else:
+    part = "شب"
+
+h12 = hour % 12 or 12
+print(f"⏰ ساعت: {now.strftime('%H:%M:%S')} ({h12}:{minute:02d} {part})")
+print(f"📅 تاریخ شمسی: {weekdays[now.weekday()]} {jd} {months[jm]} {jy}")
+print(f"🌍 میلادی: {now.strftime('%Y-%m-%d %A')} (تهران، UTC+03:30)")

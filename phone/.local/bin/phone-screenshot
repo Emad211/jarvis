@@ -1,0 +1,16 @@
+#!/data/data/com.termux/files/usr/bin/sh
+TARGET="${1:-$HOME/screenshot.png}"
+adb -s 127.0.0.1:5555 shell screencap -p /sdcard/Download/tmp_shot.png
+cp /sdcard/Download/tmp_shot.png "$TARGET" 2>/dev/null || adb -s 127.0.0.1:5555 pull /sdcard/Download/tmp_shot.png "$TARGET" >/dev/null
+echo "MEDIA:$TARGET"
+EOF
+
+cat << \"EOF\" > $HOME/.local/bin/phone-open
+#!/data/data/com.termux/files/usr/bin/sh
+PKG="$1"
+adb -s 127.0.0.1:5555 shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+echo "Opened $PKG"
+EOF
+
+chmod +x $HOME/.local/bin/phone-screenshot $HOME/.local/bin/phone-open
+ls -l $HOME/.local/bin/phone-*
