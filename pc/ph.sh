@@ -6,7 +6,7 @@ KEY="${PHONE_KEY:-/c/Users/Emad Karimi/hermes-handoff/connect/id_phone}"
 CACHE="$HOME/.hermes-phone-ip"
 USER_ID=u0_a309
 
-open8022() { python -c "import socket,sys;s=socket.socket();s.settimeout(1.5);sys.exit(s.connect_ex(('$1',8022)))" 2>/dev/null; }
+open8022() { python -c "import socket,sys;s=socket.socket();s.settimeout(6);sys.exit(s.connect_ex(('$1',8022)))" 2>/dev/null; }
 
 find_phone() {
   python - <<'PY'

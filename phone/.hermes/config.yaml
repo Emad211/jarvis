@@ -13,16 +13,36 @@ command_allowlist:
 compression:
   threshold_tokens: 300000
 model:
+  provider: google_ai_studio
+  api_mode: chat_completions
+  default: gemini-3.5-flash
   aliases:
-    dsflash: agentrouter/deepseek-v4-flash
-    v4flash: agentrouter/deepseek-v4-flash
+    chat: google_ai_studio/gemini-3.5-flash
+    img: google_ai_studio/gemini-3.1-flash-image
+    img-pro: google_ai_studio/gemini-3-pro-image
+    img-nano: google_ai_studio/nano-banana-pro-preview
+    tts: google_ai_studio/gemini-3.8-flash-tts
+    tts-pro: google_ai_studio/gemini-2.5-pro-preview-tts
+    tts-2.5-flash: google_ai_studio/gemini-2.5-flash-preview-tts
+    tts-3.1-flash: google_ai_studio/gemini-3.1-flash-tts-preview
+    music: google_ai_studio/lyria-3.5
+    music-pro: google_ai_studio/lyria-3-pro-preview
+    music-clip: google_ai_studio/lyria-3-clip-preview
+    agent: google_ai_studio/gemini-2.5-computer-use-preview-10-2025
+    agent-antigrav: google_ai_studio/antigravity-preview-latest
+    agent-antigrav2: google_ai_studio/antigravity-preview-09-2026
+    research: google_ai_studio/deep-research-max-preview-04-2026
+    research-pro: google_ai_studio/deep-research-pro-preview-12-2025
+    research-standard: google_ai_studio/deep-research-preview-04-2026
+    embed: google_ai_studio/gemini-embedding-2
+    embed-preview: google_ai_studio/gemini-embedding-2-preview
+    embed-001: google_ai_studio/gemini-embedding-001
+    stt: google_ai_studio/gemini-3.5-transcribe
     free: openrouter/minimax/minimax-m3.1-flash:free
     ultra: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
-  default: minimax/minimax-m3.1-flash:free
-  default_headers:
-    User-Agent: claude-cli/1.0.0 (external, cli)
-  provider: openrouter
-  api_mode: chat_completions
+    chat-pro: google_ai_studio/gemini-4-argon
+    argon: google_ai_studio/gemini-4-argon
+    sol: agentrouter/gpt-6.1-sol
 onboarding:
   seen:
     busy_input_prompt: true
@@ -46,17 +66,14 @@ providers:
     base_url: https://agentrouter.org
     api_mode: anthropic_messages
     key_env: AGENTROUTER_API_KEY
-    model: deepseek-v4-flash
-    context_length: 1000000
+    model: gpt-6.1-sol
     extra_headers:
       User-Agent: claude-cli/1.0.0 (external, cli)
     models:
-      deepseek-v4-flash:
-        display_name: DeepSeek V4 Flash
-        context_length: 1000000
-        max_tokens: 384000
-        supports_tools: true
-        supports_vision: false
+      gpt-6.1-sol:
+        display_name: GPT 6.1 Sol
+      gpt-6-astra:
+        display_name: GPT 6 Astra
   antigravity:
     api_key: antigravity-local
     base_url: http://127.0.0.1:8790/v1
@@ -99,20 +116,94 @@ providers:
     transport: chat_completions
     models:
     - mistral-medium-latest
+  google_ai_studio:
+    name: Google AI Studio
+    api: https://generativelanguage.googleapis.com/v1beta/openai
+    key_env: GOOGLE_AI_STUDIO_API_KEY
+    transport: chat_completions
+    default_model: gemini-3.5-flash
+    models:
+      gemini-3.8-flash:
+        display_name: Gemini 3.8 Flash
+        context_length: 1048576
+        max_tokens: 65536
+        supports_tools: true
+        supports_vision: true
+      gemini-3.7-flash:
+        display_name: Gemini 3.7 Flash
+        context_length: 1048576
+        max_tokens: 65536
+        supports_tools: true
+        supports_vision: true
+      gemini-3.6-flash:
+        display_name: Gemini 3.6 Flash
+        context_length: 1048576
+        max_tokens: 65536
+        supports_tools: true
+        supports_vision: true
+      gemini-3.5-flash:
+        display_name: Gemini 3.5 Flash
+        context_length: 1048576
+        max_tokens: 65536
+        supports_tools: true
+        supports_vision: true
+      gemini-3.5-flash-lite:
+        display_name: Gemini 3.5 Flash Lite
+        context_length: 1048576
+        max_tokens: 65536
+        supports_tools: true
+        supports_vision: true
+      gemini-3.1-flash-lite:
+        display_name: Gemini 3.1 Flash Lite
+        context_length: 1048576
+        max_tokens: 65536
+        supports_tools: true
+        supports_vision: true
+      gemini-2.5-flash:
+        display_name: Gemini 2.5 Flash
+        context_length: 1048576
+        max_tokens: 65536
+        supports_tools: true
+        supports_vision: true
+      gemini-3.1-pro-preview:
+        display_name: Gemini 3.1 Pro (needs paid tier)
+        context_length: 1048576
+        max_tokens: 65536
+        supports_tools: true
+        supports_vision: true
+      gemini-4-argon:
+        display_name: Gemini 4 Argon (needs paid tier)
+        context_length: 1048576
+        max_tokens: 32768
+        supports_tools: true
+        supports_vision: true
+      gemma-4-31b-it:
+        display_name: Gemma 4 31B
+        context_length: 262144
+        max_tokens: 32768
+        supports_tools: true
+        supports_vision: true
 quick_commands:
   flash:
-    description: DeepSeek V4 Flash (AgentRouter)
+    description: Gemini 3.5 Flash (AI Studio)
     type: alias
-    target: /model deepseek-v4-flash --provider agentrouter
+    target: /model gemini-3.5-flash --provider google_ai_studio
 stt:
   language: fa
-  provider: elevenlabs
+  provider: gemini
+  gemini:
+    model: gemini-3.5-transcribe
+    api_key_env: GOOGLE_AI_STUDIO_API_KEY
 timezone: Asia/Tehran
 tts:
   elevenlabs:
     model_id: eleven_v4_turbo
     voice_id: XzieuK0bwYWT9Kl1LhLs
-  provider: elevenlabs
+  provider: gemini
+  gemini:
+    voice: Kore
+    api_key_env: GOOGLE_AI_STUDIO_API_KEY
+    model: gemini-3.8-flash-tts
 voice:
   auto_tts: false
 streaming:
@@ -132,17 +223,20 @@ credential_pool_strategies:
   openrouter: round_robin
   agentrouter: round_robin
 fallback_providers:
+- provider: google_ai_studio
+  model: gemini-3.8-flash
+- provider: google_ai_studio
+  model: gemini-3.5-flash-lite
+- provider: openrouter
+  model: minimax/minimax-m3.1-flash:free
 - provider: openrouter
   model: nvidia/nemotron-3-ultra-550b-a55b:free
-- provider: gemini
-  model: gemini-flash-latest
-- provider: groq
-  model: openai/gpt-oss-120b
-- provider: cerebras
-  model: gpt-oss-120b
 - provider: agentrouter
-  model: deepseek-v4-flash
-- provider: openrouter
-  model: openrouter/free
+  model: gpt-6.1-sol
 - provider: antigravity
   model: gemini-3.8-flash-high
+agent:
+  reasoning_effort: xhigh
+telegram:
+  extra:
+    send_voice: true

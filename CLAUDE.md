@@ -19,10 +19,13 @@ One repo for both halves of the system. Background history: `../hermes-handoff/H
 - gwctl v3 API is documented in its docstring; most endpoints take `?profile=`.
 - Device control goes through Shizuku `rish` (uid 2000, not root). The `phone-*` helpers source
   `phone-env`, which sets `RISH_APPLICATION_ID=com.termux`.
-- Models: primary `openrouter/minimax/minimax-m3.1-flash:free`, then `fallback_providers`
-  (free OpenRouter models, Gemini, Groq, Cerebras, AgentRouter, Antigravity). Providers
-  without a key are skipped. OpenRouter/Gemini/Antigravity need the phone's VPN on;
-  AgentRouter works without it (it needs the `User-Agent: claude-cli/…` header).
+- Models: primary `google_ai_studio/gemini-3.5-flash`, then `fallback_providers` (Gemini 3.8 /
+  3.5-lite, free OpenRouter models, AgentRouter `gpt-6.1-sol`, Antigravity). Providers without a
+  key are skipped. The Google key is on the **free API tier** (Pro models return 429 until billing
+  is linked in AI Studio). AgentRouter dropped `deepseek-v4-flash`; it now serves only
+  `gpt-6.1-sol` / `gpt-6-astra` (`/v1/messages` and `/v1/responses`, not chat/completions).
+  Google's OpenAI-compatible base is `.../v1beta/openai`. OpenRouter/Gemini/Antigravity need the
+  phone's VPN on; AgentRouter does not (it needs the `User-Agent: claude-cli/…` header).
 
 ## Build / install the app
 ```bash
