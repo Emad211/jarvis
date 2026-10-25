@@ -725,6 +725,10 @@ def checks_payload(profile=None):
                 "ms": int((time.time() - started) * 1000)}
         if ok is None:
             item.update(ok=False, skipped=True)
+        elif ok is False and ("429" in item["detail"] or "quota" in item["detail"].lower()):
+            # 429 on a free-tier key means "no quota for this provider", not "broken key":
+            # show it as skipped so the health list does not read as an outage.
+            item.update(skipped=True, detail="سهمیه ندارد (free tier) — " + item["detail"][:80])
         results.append(item)
 
     def reach(url, headers=None, good=(200,)):

@@ -1,0 +1,171 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# google-probe — what of Emad's Google AI Studio key actually works right now?
+#
+#   google-probe all|image|tts|stt|music|agent|research|chat
+#
+# One line per feature:  <feature> OK|NO <provider> — <detail>
+# Tiny inputs only (a 4x4 PNG, one word of speech, a two-word prompt); the key itself is
+# read from the same place the gateway reads it (~/.hermes/.env) and is never printed.
+# Set GOOGLE_PROBE_TTS=1 to also run the end-to-end test that drives Hermes' own TTS tool
+# (that one generates a real file under ~/.hermes/audio_cache).
+set -u
+ENVF="$HOME/.hermes/.env"
+BASE="https://generativelanguage.googleapis.com/v1beta"
+WAIT="${GOOGLE_PROBE_TIMEOUT:-90}"
+K=$(grep -m1 '^GEMINI_API_KEY=' "$ENVF" 2>/dev/null | cut -d= -f2-)
+[ -n "$K" ] || { echo "no GEMINI_API_KEY in ~/.hermes/.env"; exit 1; }
+TMP="${TMPDIR:-$PREFIX/tmp}/gprobe.$$"; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
+
+# model exists on this key?  (the /v1beta models list is free and never rate limited)
+names=$(curl -s -m 60 -H "x-goog-api-key: $K" "$BASE/models?pageSize=200" -o "$TMP/models" \
+        && tr ',' '\n' < "$TMP/models" | sed -n 's/.*"name": *"models\/\([^"]*\)".*/\1/p')
+have() { echo "$names" | grep -qx "$1"; }
+
+# call <model>:generateContent <json-body-file> -> $TMP/out, prints the http code
+gen() {
+  curl -s -m "$WAIT" -o "$TMP/out" -w '%{http_code}' -H 'Content-Type: application/json' \
+    -H "x-goog-api-key: $K" "$BASE/models/$1:generateContent" --data-binary @"$2"
+}
+err() { tr -d '\n' < "$TMP/out" | sed -e 's/  */ /g' | grep -o '"message": *"[^"]*"' | head -1 | cut -c1-140; }
+
+PNG='iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAFElEQVR4nGP8z8Dwn4EIwESMolGFEAQAJhEBAoK0pMMAAAAASUVORK5CYII='
+
+# <feature> <model> -> prints the verdict for a plain text call (used for chat/agent)
+plain() {
+  printf '{"contents":[{"role":"user","parts":[{"text":"%s"}]}]}' "$2" > "$TMP/in"
+  code=$(gen "$1" "$TMP/in")
+  if [ "$code" = 200 ]; then
+    printf '%s OK (%s) — %s\n' "$FEATURE" "$1" \
+      "$(tr -d '\n' < "$TMP/out" | grep -o '"text": *"[^"]*"' | head -1 | cut -c10-90)"
+  else
+    printf '%s NO (%s) — HTTP %s %s\n' "$FEATURE" "$1" "$code" "$(err)"
+  fi
+}
+
+probe_chat() {
+  FEATURE=chat; plain gemini-3.5-flash "say ok"
+  if have gemini-3.5-flash && ! grep -q '"code": 429' "$TMP/out"; then
+    # the free tier allows 2.5 Flash on this key: show it as the chain's spare
+    have gemini-2.5-flash && { FEATURE='chat (spare)'; plain gemini-2.5-flash "say ok"; }
+  fi
+}
+
+probe_image() {
+  printf '{"contents":[{"parts":[{"text":"draw one red apple"}]}]}' > "$TMP/in"
+  hit=0
+  for m in gemini-3.1-flash-image gemini-3-pro-image nano-banana-pro-preview gemini-2.5-flash-image; do
+    have "$m" || { echo "image NO ($m) — not on this key"; continue; }
+    code=$(gen "$m" "$TMP/in")
+    if [ "$code" = 200 ] && grep -q '"data": *"[A-Za-z0-9+/=]\{200,\}' "$TMP/out"; then
+      echo "image OK ($m) — image part present"; hit=1; break
+    elif [ "$code" = 200 ]; then
+      echo "image NO ($m) — 200 but no image part"
+    else
+      echo "image NO ($m) — HTTP $code $(err)"
+    fi
+  done
+  [ "$hit" = 1 ] || echo "image blocked — free tier has no image quota until billing is linked in AI Studio"
+}
+
+probe_tts() {
+  printf '{"contents":[{"parts":[{"text":"سلام"}]}],"generationConfig":{"responseModalities":["AUDIO"]}}' > "$TMP/in"
+  for m in gemini-3.8-flash-tts gemini-3.1-flash-tts-preview gemini-2.5-flash-preview-tts; do
+    have "$m" || { echo "tts NO ($m) — not on this key"; continue; }
+    code=$(gen "$m" "$TMP/in")
+    if [ "$code" = 200 ]; then
+      echo "tts OK ($m) — $(wc -c < "$TMP/out") bytes, $(grep -c 'inlineData' "$TMP/out") audio part(s)"
+      break
+    fi
+    echo "tts NO ($m) — HTTP $code $(err)"
+  done
+  [ "${GOOGLE_PROBE_TTS:-0}" = 1 ] || return 0
+  # end-to-end: the path the bot itself uses (tools/tts_tool.py → this same model)
+  py="$PREFIX/lib/hermes-agent/app/venv/bin/python"
+  out=$("$py" - <<'PY' 2>&1 | tail -3
+import asyncio, sys
+sys.path.insert(0, "/data/data/com.termux/files/usr/lib/hermes-agent/app")
+from tools.tts_tool import _generate_gemini_tts
+cfg = {"provider": "gemini", "gemini": {"voice": "Kore", "model": "gemini-3.8-flash-tts"}}
+print("tts tool ->", asyncio.run(_generate_gemini_tts("سلام، این یک تست است.", "/data/data/com.termux/files/home/.hermes/audio_cache/gprobe.ogg", cfg)))
+PY
+)
+  echo "tts tool — $(echo "$out" | tr '\n' ' ' | cut -c1-200)"
+}
+
+probe_stt() {
+  m=gemini-3.5-transcribe
+  have "$m" || { echo "stt NO ($m) — not on this key"; return; }
+  wav="$TMP/one.wav"
+  # 1 s of real speech if a TTS model answers, else a shaped noise burst: either way the
+  # point of the probe is "does the key accept audio on this model", not transcription quality
+  printf '{"contents":[{"parts":[{"text":"سلام"}]}],"generationConfig":{"responseModalities":["AUDIO"]}}' > "$TMP/ttsin"
+  if code=$(gen gemini-3.8-flash-tts "$TMP/ttsin") && [ "$code" = 200 ]; then
+    $PREFIX/lib/hermes-agent/app/venv/bin/python - "$TMP/out" "$wav" <<'PY' >/dev/null 2>&1
+import base64, json, sys, wave
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+b64 = [p["inlineData"]["data"] for p in d["candidates"][0]["content"]["parts"] if "inlineData" in p][0]
+pcm = base64.b64decode(b64)
+w = wave.open(sys.argv[2], "wb"); w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
+w.writeframes(pcm[: 24000 * 2 * 2]); w.close()
+PY
+  fi
+  if [ -s "$wav" ]; then
+    b64=$(base64 -w0 "$wav")
+    printf '{"contents":[{"parts":[{"inlineData":{"mimeType":"audio/wav","data":"%s"}},{"text":"transcribe"}]}]}' "$b64" > "$TMP/in"
+  else
+    $PREFIX/bin/ffmpeg -v quiet -f lavfi -i "sine=frequency=440:duration=1" -ar 16000 -ac 1 -y "$TMP/t.wav" 2>/dev/null
+    b64=$(base64 -w0 "$TMP/t.wav")
+    printf '{"contents":[{"parts":[{"inlineData":{"mimeType":"audio/wav","data":"%s"}},{"text":"transcribe"}]}]}' "$b64" > "$TMP/in"
+  fi
+  code=$(gen "$m" "$TMP/in")
+  if [ "$code" = 200 ]; then
+    echo "stt OK ($m) — $(tr -d '\n' < "$TMP/out" | grep -o '"text": *"[^"]*"' | head -1 | cut -c1-80)"
+  else
+    echo "stt NO ($m) — HTTP $code $(err)"
+  fi
+}
+
+probe_music() {
+  printf '{"contents":[{"parts":[{"text":"a single soft piano note"}]}],"generationConfig":{"responseModalities":["AUDIO"]}}' > "$TMP/in"
+  for m in lyria-3-clip-preview lyria-3.5; do
+    have "$m" || { echo "music NO ($m) — not on this key"; continue; }
+    code=$(gen "$m" "$TMP/in")
+    if [ "$code" = 200 ]; then
+      echo "music OK ($m) — $(wc -c < "$TMP/out") bytes"; return
+    fi
+    echo "music NO ($m) — HTTP $code $(err)"
+  done
+}
+
+probe_agent() {
+  FEATURE=agent; plain gemini-2.5-computer-use-preview-10-2025 "say ok"
+  # antigravity-* is an agent (Interactions API), not a model: the API says so explicitly.
+  for m in antigravity-preview-latest antigravity-preview-09-2026; do
+    have "$m" || continue
+    printf '{"agent":"%s","input":"say ok","stream":false}' "$m" > "$TMP/inter"
+    code=$(curl -s -m "$WAIT" -o "$TMP/out" -w '%{http_code}' -H 'Content-Type: application/json' \
+      -H "x-goog-api-key: $K" "$BASE/interactions" --data-binary @"$TMP/inter")
+    if [ "$code" = 200 ]; then echo "agent OK ($m, Interactions API)"; return; fi
+    echo "agent NO ($m, Interactions API) — HTTP $code $(err)"
+  done
+}
+
+probe_research() {
+  for m in deep-research-preview-04-2026 deep-research-max-preview-04-2026 deep-research-pro-preview-12-2025; do
+    have "$m" || { echo "research NO ($m) — not on this key"; continue; }
+    printf '{"agent":"%s","input":"what is 2+2","stream":false}' "$m" > "$TMP/inter"
+    code=$(curl -s -m "$WAIT" -o "$TMP/out" -w '%{http_code}' -H 'Content-Type: application/json' \
+      -H "x-goog-api-key: $K" "$BASE/interactions" --data-binary @"$TMP/inter")
+    if [ "$code" = 200 ]; then
+      echo "research OK ($m) — $(tr -d '\n' < "$TMP/out" | cut -c1-120)"; return
+    fi
+    echo "research NO ($m) — HTTP $code $(err)"
+  done
+}
+
+case "${1:-all}" in
+  image) probe_image ;; tts) probe_tts ;; stt) probe_stt ;; music) probe_music ;;
+  agent) probe_agent ;; research) probe_research ;; chat) probe_chat ;;
+  all) probe_chat; probe_image; probe_tts; probe_stt; probe_music; probe_agent; probe_research ;;
+  *) echo "usage: google-probe all|chat|image|tts|stt|music|agent|research"; exit 2 ;;
+esac
