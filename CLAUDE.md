@@ -5,17 +5,31 @@ One repo for both halves of the system. Background history: `../hermes-handoff/H
 
 ## Layout
 - `java/`, `res/`, `assets/`, `AndroidManifest.xml`, `build.sh` — **Hermes Control** app
-  (`ir.emad.hermesctl`), a pure client of gwctl. No Gradle; do not add it.
+  (`ir.emad.hermesctl`), a pure supervisor/health client of gwctl. No Gradle; do not add it.
+- `jarvis/` — **Jarvis** app (`ir.emad.jarvis`), the chat console: streaming answers, live
+  tool cards, approvals, mic/TTS. Talks only to `jarvisd` on `127.0.0.1:8780`.
+  Build with `pwsh -File jarvis/build.ps1` (add `-Install` to push it to the phone).
 - `phone/` — mirror of the phone's Termux `$HOME` (scripts, gwctl, bridge, SOUL, skills).
   `phone/.hermes/config.yaml` is a **reference snapshot only**: it is live state on the phone,
   edited via `hermes config set` / gwctl, and `pc/deploy-phone.sh` never pushes it.
 - `pc/ph.sh` — run a command on the phone over SSH (finds the phone's drifting DHCP IP itself).
 - `pc/deploy-phone.sh [--all]` — push `phone/` to the phone and restart services.
+- `docs/` — `jarvis-architecture.md`, `google-features.md`, `hermes-embedding-api.md`
+  (measured facts about Hermes' internals; read before touching the agent runtime).
 
 ## Phone runtime
-- `hermes-svc` supervises everything in tmux + restart loops: `gwctl` (:8777), `agy`
-  (Antigravity bridge :8790), `router` (OmniRoute :20128, if installed), `gw` (gateway),
-  `gw-<profile>` (one per Hermes profile that has its own bot token). Boot runs `hermes-svc boot`.
+- `hermes-svc` supervises everything in tmux + restart loops: `gwctl` (:8777), `jarvis`
+  (`jarvisd`, the console's agent on :8780), `agy` (:8790), `router` (OmniRoute :20128, if
+  installed), `gw` (gateway), `tgwatch` (restarts a gateway whose Telegram gave up after a VPN
+  drop), `gw-<profile>` (one gateway per Hermes profile that has its own bot token).
+  Boot runs `hermes-svc boot`.
+- `jarvisd` keeps a **warm in-process `AIAgent`** per session. Measured on this phone
+  (2026-10-26): warm turn ≈ 1.8–4 s to first token, `hermes -z` ≈ 13–120 s, cold
+  `AIAgent()` ≈ 24 s. Never route chat through `/agent/test` or a fresh `hermes -z`.
+- Hermes also ships an OpenAI-compatible API server (`gateway/platforms/api_server.py`,
+  `platforms.api_server.enabled`, key `API_SERVER_KEY`, port 8642) with `/v1/runs` + SSE +
+  approvals. It works here, but each run rebuilds an agent and the first one after a gateway
+  restart pays the cold-start cliff — `docs/hermes-embedding-api.md` has the numbers.
 - gwctl v3 API is documented in its docstring; most endpoints take `?profile=`.
 - Device control goes through Shizuku `rish` (uid 2000, not root). The `phone-*` helpers source
   `phone-env`, which sets `RISH_APPLICATION_ID=com.termux`.
@@ -41,5 +55,15 @@ arguments, so `build.sh` passes `C:/…` paths (`cygpath -m`). With adb from git
 - Never bind gwctl beyond 127.0.0.1. Watchdog stays a JobScheduler job (no foreground service).
 - Never launch the gateway with bare `nohup`; use `hermes-svc`.
 - Keep `allow-external-apps=true` in `~/.termux/termux.properties` (the app's wake button needs it).
-- TTS stays `eleven_v4_turbo` (multilingual_v2 has no Persian).
+- TTS: Telegram stays `eleven_v4_turbo` (multilingual_v2 has no Persian); the console uses
+  Gemini TTS (`tts.provider: gemini`) because the ElevenLabs key answers 403 from this phone.
 - Phone scripts must keep LF line endings (`.gitattributes` enforces it).
+- `jarvisd` and gwctl are loopback-only, no auth by design (same trust model). Do not add a
+  second listener on a non-loopback address without a token.
+
+## Accepting a change to the console
+```powershell
+pwsh -File jarvis\build.ps1 -Install
+# then on the phone: send a message that needs a tool, confirm the tool card + answer
+# appear in the same turn, and that `/status` stays "connected".
+```

@@ -36,6 +36,7 @@ spec() {
     router) command -v omniroute >/dev/null && echo "$HERMES/router.log|omniroute" ;;
     tgwatch) echo "$HERMES/hermes-svc.log|sh $HOME/.local/bin/hermes-svc telegram-watch" ;;
     gw)     [ -f "$HERMES/.env" ] && echo "$HERMES/gw-live.log|hermes gateway run --replace" ;;
+    jarvis) echo "$HERMES/jarvis.log|$VENV_PY $HOME/.local/bin/jarvisd.py" ;;
     gw-*)   p=${1#gw-}; [ -d "$HERMES/profiles/$p" ] && \
               echo "$HERMES/profiles/$p/gw-live.log|hermes -p $p gateway run --replace" ;;
   esac
@@ -74,7 +75,7 @@ stop() {
   echo "$1: stopped"
 }
 
-all() { echo gwctl agy router gw tgwatch $(profiles | sed 's/^/gw-/'); }
+all() { echo gwctl jarvis agy router gw tgwatch $(profiles | sed 's/^/gw-/'); }
 
 # One-shot recovery for the case that no restart loop can fix: the gateway starts before
 # the phone's VPN is up, burns its 8 Telegram connect attempts and then sits in

@@ -1,0 +1,31 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# How fast does Google answer, really? Time-to-first-byte for a streamed chat call,
+# measured from the phone with the same key the gateway uses (never printed).
+#   gspeed [model ...]
+set -u
+K=$(grep -m1 '^GEMINI_API_KEY=' "$HOME/.hermes/.env" | cut -d= -f2-)
+[ -n "$K" ] || { echo "no GEMINI_API_KEY"; exit 1; }
+URL="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+T="${TMPDIR:-$PREFIX/tmp}"
+[ -d "$T" ] || T="$HOME"
+for m in "${@:-gemini-3.5-flash gemini-3.5-flash-lite gemini-2.5-flash}"; do
+  for m in $m; do
+    body=$(printf '{"model":"%s","messages":[{"role":"user","content":"reply with exactly: READY"}],"stream":true,"max_tokens":16}' "$m")
+    start=$(date +%s%N)
+    first=""
+    text=$(printf '%s' "$body" | curl -s -N -m 40 -H "Authorization: Bearer $K" -H 'Content-Type: application/json' \
+      --data-binary @- "$URL" 2>/dev/null | while IFS= read -r line; do
+        case "$line" in
+          data:*) if [ -z "$first" ]; then first=$(date +%s%N); echo "FIRST $first" >"$T/gs.$$"; fi ;;
+        esac
+        printf '%s\n' "$line"
+      done)
+    end=$(date +%s%N)
+    first=$(sed -n 's/^FIRST //p' "$T/gs.$$" 2>/dev/null | head -1)
+    rm -f "$T/gs.$$"
+    ttft=$(( (${first:-$end} - start) / 1000000 ))
+    total=$(( (end - start) / 1000000 ))
+    chunks=$(printf '%s' "$text" | grep -c '^data:')
+    printf '%-26s ttft=%5sms total=%5sms chunks=%s\n' "$m" "$ttft" "$total" "$chunks"
+  done
+done

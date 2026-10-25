@@ -4,6 +4,10 @@ dist/
 keystore.jks
 shots/
 .claude/
+.tmp/
+# the console app has its own build output
+jarvis/build/
+jarvis/dist/
 # secrets — never commit
 phone/.hermes/.env
 phone/.hermes/auth.json
