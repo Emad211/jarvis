@@ -44,7 +44,8 @@ final class ModelsScreen extends Screen {
         String[] cur = split(current);
 
         LinearLayout card = Ui.card(a);
-        card.setBackground(Ui.gradient(a, Ui.alpha(Ui.ACCENT, 40), Ui.SURFACE, 24));
+        // Flat card: the primary model is already the biggest, boldest text on the screen,
+        // so it does not also need an accent wash behind it.
         card.addView(Ui.text(a, "مدل اصلی", 12f, Ui.DIM, false));
         TextView name = Ui.ltr(a, cur[1], 18f, Ui.TEXT, true);
         name.setPadding(0, Ui.dp(a, 8), 0, Ui.dp(a, 2));

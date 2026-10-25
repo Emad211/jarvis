@@ -194,7 +194,7 @@ final class SettingsScreen extends Screen {
                 break;
             }
             default: {
-                r.addView(Ui.pill(a, shortValue(J.str(f, "value", "—")), Ui.TEAL));
+                r.addView(Ui.pill(a, shortValue(J.str(f, "value", "—")), Ui.ACCENT));
                 r.setBackground(Ui.ripple(a, null, Ui.ACCENT));
                 r.setOnClickListener(v -> a.prompt(J.str(f, "label", key), new String[]{key},
                         new String[]{J.str(f, "value", "")}, -1, out -> set(key, out[0])));

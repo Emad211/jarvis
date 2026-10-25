@@ -42,6 +42,7 @@ public class MainActivity extends Activity {
 
     private ListView list;
     private ChatAdapter adapter;
+    private LinearLayout chips;
     private EditText input;
     private TextView stateLine;
     private TextView modelChip;
@@ -158,7 +159,16 @@ public class MainActivity extends Activity {
         list.setAdapter(adapter);
         root.addView(list, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        // quick actions above the input: new chat, listen (TTS toggle)
+        // quick actions: deterministic device intents, no model, no waiting
+        chips = Ui.row(this);
+        chips.setPadding(Ui.dp(this, 4), 0, Ui.dp(this, 4), 0);
+        android.widget.HorizontalScrollView strip = new android.widget.HorizontalScrollView(this);
+        strip.setHorizontalScrollBarEnabled(false);
+        strip.setPadding(Ui.dp(this, 10), Ui.dp(this, 2), Ui.dp(this, 10), 0);
+        strip.addView(chips);
+        root.addView(strip, Ui.fill());
+
+        // input bar: mic, field, send
         LinearLayout bar = Ui.row(this);
         bar.setPadding(Ui.dp(this, 10), Ui.dp(this, 6), Ui.dp(this, 10), Ui.dp(this, 12));
         micIcon = Ui.iconButton(this, Icon.MIC, Ui.ACCENT, v -> toggleMic());
@@ -199,6 +209,7 @@ public class MainActivity extends Activity {
             } else {
                 attachStream();
             }
+            firstRunIfNeeded();
         }, msg -> {
             setState("به سرویس وصل نیست — Termux/جارویس را روشن کن", Ui.RED);
             note("دسترسی به 127.0.0.1:8780 نیست: " + msg);
@@ -291,8 +302,63 @@ public class MainActivity extends Activity {
                 model = current;
             }
             modelChip.setText(ChatAdapter.shortModel(model));
+            fillChips(res.optJSONArray("chips"));
         }, msg -> {
             // catalog is only for the pickers; the chat works without it
+        });
+    }
+
+    /** One-tap actions from the daemon's catalog: these never touch the model. */
+    private void fillChips(JSONArray defs) {
+        if (chips == null || defs == null) {
+            return;
+        }
+        chips.removeAllViews();
+        for (int i = 0; i < defs.length(); i++) {
+            JSONObject def = defs.optJSONObject(i);
+            if (def == null) {
+                continue;
+            }
+            String label = def.optString("label", def.optString("intent", ""));
+            String intent = def.optString("intent", "");
+            JSONObject args = def.optJSONObject("args");
+            TextView chip = Ui.pill(this, label, Ui.ACCENT);
+            chip.setOnClickListener(v -> runFast(intent, args, label));
+            chips.addView(chip, Ui.margins(Ui.wrap(), this, 0, 0, 6, 6));
+        }
+    }
+
+    /** Runs a deterministic device action and shows its verdict in the transcript. */
+    private void runFast(String intent, JSONObject args, String label) {
+        if (intent.isEmpty()) {
+            return;
+        }
+        final Msg row = new Msg(Msg.ACTION);
+        row.actionLabel = label;
+        row.actionOk = true;
+        row.text.append("…");
+        messages.add(row);
+        notifyList();
+        JSONObject payload = Api.body("intent", intent);
+        if (args != null) {
+            try {
+                payload.put("args", args);
+            } catch (Exception ignored) {
+                // args are optional
+            }
+        }
+        Api.post("/fast", payload, 30000, res -> {
+            row.actionOk = res.optBoolean("ok", false);
+            row.text.setLength(0);
+            row.text.append(res.optString("detail", ""));
+            row.media = res.optString("media", "");
+            row.totalMs = res.optInt("ms", 0);
+            notifyList();
+        }, msg -> {
+            row.actionOk = false;
+            row.text.setLength(0);
+            row.text.append(msg);
+            notifyList();
         });
     }
 
@@ -331,7 +397,7 @@ public class MainActivity extends Activity {
                 streaming.tools.add(new Msg.ToolEv(data.optString("id", ""), name,
                         data.optString("args", "")));
                 notifyList();
-                setState("ابزار: " + name, Ui.TEAL);
+                setState("ابزار: " + name, Ui.ACCENT);
                 break;
             }
             case "tool.end": {
@@ -529,6 +595,7 @@ public class MainActivity extends Activity {
                 "گفتگوی تازه",
                 "گفتگوهای قبلی",
                 "تنظیمات",
+                "راه‌اندازی اولیه",
                 "صدا روی پاسخ‌ها: " + (ttsOn ? "روشن" : "خاموش"),
                 "کپی آخرین پاسخ",
         };
@@ -546,6 +613,9 @@ public class MainActivity extends Activity {
                             settings();
                             break;
                         case 3:
+                            setupWizard();
+                            break;
+                        case 4:
                             ttsOn = !ttsOn;
                             prefs.edit().putBoolean("tts", ttsOn).apply();
                             toast(ttsOn ? "صدا روشن شد" : "صدا خاموش شد");
@@ -555,6 +625,167 @@ public class MainActivity extends Activity {
                             break;
                     }
                 }).show();
+    }
+
+    // -------------------------------------------------------------------- first run --
+    /** Shows the wizard automatically on a phone that has no provider key yet. */
+    private void firstRunIfNeeded() {
+        Api.get("/setup/state", 12000, res -> {
+            if (res.optBoolean("needs_setup", false)) {
+                note("برای شروع، یک کلید پرووایدر لازم است.");
+                setupWizard();
+            }
+        }, msg -> {
+            // an older daemon has no setup endpoints; the console still works if keys exist
+        });
+    }
+
+    /** Provider → key → live test → default model. Everything is written by the daemon. */
+    private void setupWizard() {
+        Api.get("/setup/state", 12000, state -> {
+            JSONArray providers = state.optJSONArray("providers");
+            if (providers == null || providers.length() == 0) {
+                toast("لیست پرووایدرها نیامد");
+                return;
+            }
+            final List<String> ids = new ArrayList<>();
+            final List<String> labels = new ArrayList<>();
+            for (int i = 0; i < providers.length(); i++) {
+                JSONObject p = providers.optJSONObject(i);
+                if (p == null) {
+                    continue;
+                }
+                ids.add(p.optString("id", ""));
+                labels.add(p.optString("label", "") + (p.optBoolean("has_key") ? "  ✓" : ""));
+            }
+            new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                    .setTitle("کدام پرووایدر؟")
+                    .setItems(labels.toArray(new String[0]), (d, which) ->
+                            askKey(providerById(providers, ids.get(which)), providers))
+                    .setNegativeButton("بعداً", null)
+                    .show();
+        }, msg -> toast("وضعیت راه‌اندازی نیامد: " + msg));
+    }
+
+    private static JSONObject providerById(JSONArray providers, String id) {
+        for (int i = 0; i < providers.length(); i++) {
+            JSONObject p = providers.optJSONObject(i);
+            if (p != null && id.equals(p.optString("id"))) {
+                return p;
+            }
+        }
+        return new JSONObject();
+    }
+
+    private void askKey(JSONObject provider, JSONArray providers) {
+        String id = provider.optString("id", "");
+        String env = provider.optString("key_env", "");
+        String url = provider.optString("key_url", "");
+        final EditText key = Ui.input(this, env);
+        key.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        key.setTextDirection(View.TEXT_DIRECTION_LTR);
+        LinearLayout box = Ui.col(this);
+        box.setPadding(Ui.dp(this, 20), Ui.dp(this, 8), Ui.dp(this, 20), 0);
+        box.addView(Ui.text(this, "کلید " + provider.optString("label", id)
+                + " را بچسبان (فقط روی گوشی ذخیره می‌شود):", 12.5f, Ui.DIM, false));
+        box.addView(key, Ui.margins(Ui.fill(), this, 0, 8, 0, 0));
+        if (!url.isEmpty()) {
+            TextView link = Ui.text(this, "گرفتن کلید: " + url, 11.5f, Ui.ACCENT, false);
+            link.setOnClickListener(v -> openUrl(url));
+            box.addView(link, Ui.margins(Ui.fill(), this, 0, 8, 0, 0));
+        }
+        box.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                .setTitle("کلید API")
+                .setView(box)
+                .setPositiveButton("ذخیره و تست", (d, w) ->
+                        saveKey(provider, key.getText().toString().trim(), providers))
+                .setNegativeButton("لغو", null)
+                .show();
+    }
+
+    private void saveKey(JSONObject provider, String key, JSONArray providers) {
+        final String id = provider.optString("id", "");
+        if (key.isEmpty()) {
+            toast("کلید خالی است");
+            return;
+        }
+        AlertDialog dlg = progress("ذخیره و تست کلید…");
+        Api.post("/setup/key", Api.body("provider", id, "key", key), 20000, res -> {
+            if (!res.optBoolean("ok", false)) {
+                dlg.dismiss();
+                toast("ذخیره نشد: " + res.optString("error", "?"));
+                return;
+            }
+            Api.post("/setup/test", Api.body("provider", id), 60000, test -> {
+                dlg.dismiss();
+                if (!test.optBoolean("ok", false)) {
+                    a11yToast("کلید ذخیره شد ولی تست رد شد: " + test.optString("error", "?")
+                            + " (" + test.optInt("ms", 0) + " ms)");
+                    pickModel(provider);
+                    return;
+                }
+                toast("کلید کار می‌کند (" + test.optInt("ms", 0) + " ms)");
+                pickModel(provider);
+            }, msg -> {
+                dlg.dismiss();
+                toast("تست نشد: " + msg);
+                pickModel(provider);
+            });
+        }, msg -> {
+            dlg.dismiss();
+            toast("ذخیره نشد: " + msg);
+        });
+    }
+
+    private void pickModel(JSONObject provider) {
+        JSONArray models = provider.optJSONArray("models");
+        if (models == null || models.length() == 0) {
+            loadCatalog();
+            return;
+        }
+        final List<String> ids = new ArrayList<>();
+        final List<String> labels = new ArrayList<>();
+        for (int i = 0; i < models.length(); i++) {
+            JSONObject m = models.optJSONObject(i);
+            if (m != null) {
+                ids.add(m.optString("id", ""));
+                labels.add(m.optString("label", m.optString("id", "")));
+            }
+        }
+        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                .setTitle("مدل پیش‌فرض")
+                .setItems(labels.toArray(new String[0]), (d, which) ->
+                        applyModel(provider.optString("id", ""), ids.get(which)))
+                .setNegativeButton("بعداً", (d, w) -> loadCatalog())
+                .show();
+    }
+
+    private void applyModel(String provider, String model) {
+        AlertDialog dlg = progress("ثبت مدل…");
+        Api.post("/setup/model", Api.body("provider", provider, "model", model), 60000, res -> {
+            dlg.dismiss();
+            if (!res.optBoolean("ok", false)) {
+                toast("ثبت نشد: " + res.optString("detail", "?"));
+                return;
+            }
+            this.model = model;
+            prefs.edit().putString("model", model).apply();
+            modelChip.setText(ChatAdapter.shortModel(model));
+            toast("آماده است — بپرس");
+            loadCatalog();
+            if (!sessionId.isEmpty()) {
+                Api.post("/session/" + sessionId + "/model", Api.body("model", model), 15000,
+                        r -> { }, m -> { });
+            }
+        }, msg -> {
+            dlg.dismiss();
+            toast("ثبت نشد: " + msg);
+        });
+    }
+
+    private void a11yToast(String text) {
+        toast(text.length() > 80 ? text.substring(0, 79) + "…" : text);
     }
 
     private void messageMenu(Msg m) {
@@ -707,6 +938,28 @@ public class MainActivity extends Activity {
 
     void toast(String msg) {
         android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show();
+    }
+
+    /** Small modal spinner for an action that may take a few seconds. */
+    AlertDialog progress(String message) {
+        LinearLayout box = Ui.row(this);
+        box.setPadding(Ui.dp(this, 20), Ui.dp(this, 16), Ui.dp(this, 20), Ui.dp(this, 16));
+        android.widget.ProgressBar spin = new android.widget.ProgressBar(this);
+        box.addView(spin, new LinearLayout.LayoutParams(Ui.dp(this, 22), Ui.dp(this, 22)));
+        box.addView(Ui.text(this, message, 13f, Ui.TEXT, false),
+                Ui.margins(Ui.wrap(), this, 12, 0, 0, 0));
+        box.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+        return new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                .setView(box).setCancelable(false).show();
+    }
+
+    void openUrl(String url) {
+        try {
+            startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse(url)));
+        } catch (Exception e) {
+            toast("مرورگری پیدا نشد");
+        }
     }
 
     private void notifyList() {

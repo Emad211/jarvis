@@ -45,31 +45,29 @@ final class HomeScreen extends Screen {
         String tg = J.str(st, "telegram", "unknown");
         String overall = J.str(st, "overall", "offline");
 
-        // hero ---------------------------------------------------------------------
+        // status row -----------------------------------------------------------------
+        // No ring and no gradient: a dot names the state, the id names the model, uptime
+        // sits on one line. See docs/design-system.md, "Status row".
         LinearLayout hero = Ui.card(a);
-        hero.setBackground(Ui.gradient(a, Ui.alpha(color, 46), Ui.SURFACE, 26));
-        hero.setPadding(Ui.dp(a, 18), Ui.dp(a, 18), Ui.dp(a, 18), Ui.dp(a, 18));
-        LinearLayout heroRow = Ui.row(a);
-        StatusRing ring = new StatusRing(a, 76);
-        ring.set("online".equals(overall) ? ("connected".equals(tg) ? 1f : 0.7f)
-                : ("starting".equals(overall) ? 0.4f : 0.06f), color);
-        heroRow.addView(ring);
         LinearLayout info = Ui.col(a);
-        info.addView(Ui.text(a, "online".equals(overall) ? "ربات فعال است"
-                : "starting".equals(overall) ? "در حال بالا آمدن…" : "ربات خاموش است", 19f, Ui.TEXT, true));
+        LinearLayout headline = Ui.row(a);
+        headline.addView(Ui.dot(a, color, 8));
+        headline.addView(Ui.text(a, "online".equals(overall) ? "ربات فعال است"
+                        : "starting".equals(overall) ? "در حال بالا آمدن…" : "ربات خاموش است",
+                17f, Ui.TEXT, true), Ui.margins(Ui.wrap(), a, 8, 0, 0, 0));
+        info.addView(headline);
         TextView model = Ui.oneLine(Ui.ltr(a, J.str(st, "model", "—"), 12.5f, Ui.ACCENT, true));
-        model.setPadding(0, Ui.dp(a, 8), 0, 0);
+        model.setPadding(0, Ui.dp(a, 7), 0, 0);
         info.addView(model);
-        LinearLayout chips = Ui.row(a);
-        chips.setPadding(0, Ui.dp(a, 10), 0, 0);
-        chips.addView(Ui.pill(a, "تلگرام: " + telegramLabel(tg), "connected".equals(tg) ? Ui.GREEN : Ui.AMBER));
         long up = J.l(st, "uptime_seconds", -1);
+        StringBuilder meta = new StringBuilder("تلگرام: ").append(telegramLabel(tg));
         if (up >= 0) {
-            chips.addView(Ui.pill(a, Ui.duration(up), Ui.DIM), Ui.margins(Ui.wrap(), a, 6, 0, 0, 0));
+            meta.append("  ·  ").append(Ui.duration(up));
         }
-        info.addView(chips);
-        heroRow.addView(info, Ui.margins(Ui.weight(1f), a, 16, 0, 0, 0));
-        hero.addView(heroRow);
+        TextView metaLine = Ui.oneLine(Ui.text(a, meta, 11.5f, Ui.DIM, false));
+        metaLine.setPadding(0, Ui.dp(a, 5), 0, 0);
+        info.addView(metaLine);
+        hero.addView(info);
         String err = J.str(st, "telegram_error", "");
         if (!"connected".equals(tg) && !err.isEmpty()) {
             TextView e = Ui.ltr(a, err, 11f, Ui.AMBER, false);
@@ -83,13 +81,15 @@ final class HomeScreen extends Screen {
         }
 
         // quick actions --------------------------------------------------------------
+        // Neutral tiles: the icon keeps the action's colour, the tile does not. Four
+        // pastel fills in a row was the loudest thing on the screen.
         LinearLayout actions = Ui.row(a);
         actions.addView(action(Icon.REFRESH, "ری‌استارت", Ui.ACCENT, v -> a.confirm(
                 "ری‌استارت ربات", "ربات حدود ۳۰ ثانیه قطع و دوباره وصل می‌شود.", "ری‌استارت",
                 a::restartGateway)), Ui.weight(1f));
-        actions.addView(action(Icon.BOLT, "تست ایجنت", Ui.TEAL, v -> agentTest()),
+        actions.addView(action(Icon.BOLT, "تست ایجنت", Ui.ACCENT, v -> agentTest()),
                 Ui.margins(Ui.weight(1f), a, 8, 0, 0, 0));
-        actions.addView(action(Icon.SEND, "پیام", Ui.GREEN, v -> sendMessage()),
+        actions.addView(action(Icon.SEND, "پیام", Ui.ACCENT, v -> sendMessage()),
                 Ui.margins(Ui.weight(1f), a, 8, 0, 0, 0));
         actions.addView(action(Icon.POWER, "توقف", Ui.RED, v -> a.confirm("توقف ربات",
                 "ربات تلگرام خاموش می‌شود تا دوباره روشنش کنی.", "توقف", this::stop)),
@@ -146,7 +146,7 @@ final class HomeScreen extends Screen {
             double m = J.d(mem, "percent", 0);
             meter(card, "حافظه", String.format(java.util.Locale.US, "%.0f٪ · %s آزاد", m,
                     Ui.size(J.l(mem, "available_kb", 0) * 1024L)), (float) m / 100f,
-                    m >= 90 ? Ui.RED : m >= 75 ? Ui.AMBER : Ui.TEAL);
+                    m >= 90 ? Ui.RED : m >= 75 ? Ui.AMBER : Ui.ACCENT);
             JSONObject data = J.obj(J.obj(system, "storage"), "داده");
             double d = J.d(data, "percent", 0);
             meter(card, "فضای ذخیره", String.format(java.util.Locale.US, "%.0f٪ · %s آزاد", d,
@@ -177,11 +177,11 @@ final class HomeScreen extends Screen {
         LinearLayout t = Ui.col(a);
         t.setGravity(android.view.Gravity.CENTER);
         t.setPadding(0, Ui.dp(a, 14), 0, Ui.dp(a, 12));
-        t.setBackground(Ui.ripple(a, Ui.outline(a, Ui.SURFACE, Ui.STROKE, 20), color));
+        t.setBackground(Ui.ripple(a, Ui.outline(a, Ui.SURFACE, Ui.STROKE, Ui.R_CARD), Ui.ACCENT));
         Icon i = new Icon(a, glyph, color);
         int p = Ui.dp(a, 9);
         i.setPadding(p, p, p, p);
-        i.setBackground(Ui.round(a, Ui.alpha(color, 30), 14));
+        i.setBackground(Ui.round(a, Ui.alpha(color, 26), Ui.R_CHIP));
         t.addView(i);
         TextView tv = Ui.oneLine(Ui.text(a, label, 12f, Ui.TEXT, true));
         tv.setPadding(0, Ui.dp(a, 8), 0, 0);

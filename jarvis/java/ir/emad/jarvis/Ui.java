@@ -19,6 +19,8 @@ import android.widget.TextView;
 /** Design tokens and the handful of widgets the console reuses. */
 final class Ui {
 
+    // Palette (docs/design-system.md): two neutrals, one accent, three status colours.
+    // Same token set as Hermes Control — the two apps must look like one system.
     static final int BG = 0xFF07090E;
     static final int SURFACE = 0xFF11151D;
     static final int SURFACE_2 = 0xFF1A2029;
@@ -27,13 +29,18 @@ final class Ui {
     static final int DIM = 0xFF9BA6B6;
     static final int FAINT = 0xFF6A7484;
     static final int ACCENT = 0xFF7FA6FF;
-    static final int TEAL = 0xFF56E0C8;
     static final int GREEN = 0xFF4ADE80;
     static final int AMBER = 0xFFFBBF24;
     static final int RED = 0xFFF87171;
-    /** User bubbles: a warm, quiet surface so the eye finds its own turns first. */
+    /** User bubbles: a slightly lifted neutral, so the eye finds its own turns first. */
     static final int USER = 0xFF1D2A44;
     static final int ON_ACCENT = 0xFF06101F;
+
+    /** One radius scale; nothing in the console invents its own number. */
+    static final float R_CHIP = 12f;
+    static final float R_INPUT = 14f;
+    static final float R_BUTTON = 16f;
+    static final float R_BUBBLE = 20f;
 
     static Typeface REG = Typeface.SANS_SERIF;
     static Typeface BOLD = Typeface.DEFAULT_BOLD;
@@ -144,10 +151,11 @@ final class Ui {
         return t;
     }
 
+    /** Quiet chip: a border and a tint, not a filled pastel block. */
     static TextView pill(Context ctx, String label, int color) {
         TextView t = text(ctx, label, 11f, color, true);
         t.setPadding(dp(ctx, 9), dp(ctx, 4), dp(ctx, 9), dp(ctx, 4));
-        t.setBackground(round(ctx, alpha(color, 40), 20));
+        t.setBackground(outline(ctx, alpha(color, 18), alpha(color, 70), R_CHIP));
         return t;
     }
 
@@ -155,7 +163,7 @@ final class Ui {
         TextView t = text(ctx, label, 14f, ON_ACCENT, true);
         t.setGravity(Gravity.CENTER);
         t.setPadding(dp(ctx, 16), dp(ctx, 12), dp(ctx, 16), dp(ctx, 12));
-        t.setBackground(ripple(ctx, round(ctx, color, 16), Color.WHITE));
+        t.setBackground(ripple(ctx, round(ctx, color, R_BUTTON), Color.WHITE));
         t.setOnClickListener(l);
         return t;
     }
@@ -164,7 +172,7 @@ final class Ui {
         TextView t = text(ctx, label, 13f, color, true);
         t.setGravity(Gravity.CENTER);
         t.setPadding(dp(ctx, 13), dp(ctx, 9), dp(ctx, 13), dp(ctx, 9));
-        t.setBackground(ripple(ctx, round(ctx, alpha(color, 32), 14), color));
+        t.setBackground(ripple(ctx, round(ctx, alpha(color, 32), R_BUTTON), color));
         t.setOnClickListener(l);
         return t;
     }
@@ -173,7 +181,7 @@ final class Ui {
         Icon i = new Icon(ctx, glyph, color);
         int p = dp(ctx, 10);
         i.setPadding(p, p, p, p);
-        i.setBackground(ripple(ctx, round(ctx, alpha(color, 26), 14), color));
+        i.setBackground(ripple(ctx, round(ctx, alpha(color, 26), R_CHIP), color));
         i.setOnClickListener(l);
         i.setLayoutParams(new LinearLayout.LayoutParams(dp(ctx, 42), dp(ctx, 42)));
         return i;
@@ -193,7 +201,7 @@ final class Ui {
         e.setHintTextColor(FAINT);
         e.setTypeface(REG);
         e.setTextSize(15f);
-        e.setBackground(outline(ctx, SURFACE_2, STROKE, 18));
+        e.setBackground(outline(ctx, SURFACE_2, STROKE, R_INPUT));
         e.setPadding(dp(ctx, 14), dp(ctx, 11), dp(ctx, 14), dp(ctx, 11));
         return e;
     }

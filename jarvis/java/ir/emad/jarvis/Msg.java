@@ -9,6 +9,7 @@ final class Msg {
     static final String USER = "user";
     static final String ASSISTANT = "assistant";
     static final String NOTE = "note";
+    static final String ACTION = "action";
 
     final String role;
     final StringBuilder text = new StringBuilder();
@@ -19,6 +20,10 @@ final class Msg {
     Integer totalMs;
     String model;
     int seq;
+    /** For ACTION rows: the fast-path verdict and any media the daemon produced. */
+    boolean actionOk;
+    String actionLabel = "";
+    String media = "";
 
     Msg(String role) {
         this.role = role;

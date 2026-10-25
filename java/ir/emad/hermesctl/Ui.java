@@ -20,7 +20,9 @@ import android.widget.TextView;
 /** Design system: palette, type scale, surfaces and the few widgets every screen shares. */
 public final class Ui {
 
-    // Palette: deep slate background, one cool accent, semantic status colours.
+    // Palette (docs/design-system.md): two neutrals, one accent, three status colours.
+    // There is no decorative colour and no gradient — hierarchy comes from border, weight
+    // and whitespace. Read the doc before adding a token here.
     public static final int BG = 0xFF0B0F17;
     public static final int SURFACE = 0xFF131A26;
     public static final int SURFACE_2 = 0xFF1B2433;
@@ -29,11 +31,16 @@ public final class Ui {
     public static final int DIM = 0xFF9AA7BC;
     public static final int FAINT = 0xFF64718A;
     public static final int ACCENT = 0xFF8AA4FF;
-    public static final int TEAL = 0xFF5EEAD4;
     public static final int GREEN = 0xFF4ADE80;
     public static final int AMBER = 0xFFFBBF24;
     public static final int RED = 0xFFF87171;
     public static final int ON_ACCENT = 0xFF0B1022;
+
+    /** One radius scale; nothing in the app invents its own number. */
+    public static final float R_CHIP = 12f;
+    public static final float R_INPUT = 14f;
+    public static final float R_BUTTON = 16f;
+    public static final float R_CARD = 20f;
 
     public static Typeface REG = Typeface.SANS_SERIF;
     public static Typeface BOLD = Typeface.DEFAULT_BOLD;
@@ -73,16 +80,13 @@ public final class Ui {
         return d;
     }
 
-    public static GradientDrawable gradient(Context ctx, int from, int to, float radiusDp) {
-        GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TR_BL,
-                new int[]{from, to});
-        d.setCornerRadius(dp(ctx, radiusDp));
-        return d;
-    }
-
+    /**
+     * Deliberately no gradient helper: surfaces are flat fill + 1px border, and hierarchy is
+     * border/whitespace/weight. See docs/design-system.md, "What this system is not".
+     */
     public static Drawable ripple(Context ctx, Drawable base, int tint) {
         return new RippleDrawable(ColorStateList.valueOf(alpha(tint, 60)), base,
-                base == null ? round(ctx, Color.WHITE, 14) : null);
+                base == null ? round(ctx, Color.WHITE, R_CHIP) : null);
     }
 
     // ---------------------------------------------------------------- layout --
@@ -172,11 +176,11 @@ public final class Ui {
     }
 
     // --------------------------------------------------------------- widgets --
-    /** Rounded surface with padding; the basic building block of every screen. */
+    /** Flat surface + 1px border; the basic building block of every screen. No shadow. */
     public static LinearLayout card(Context ctx) {
         LinearLayout box = col(ctx);
         box.setPadding(dp(ctx, 16), dp(ctx, 14), dp(ctx, 16), dp(ctx, 14));
-        box.setBackground(outline(ctx, SURFACE, STROKE, 22));
+        box.setBackground(outline(ctx, SURFACE, STROKE, R_CARD));
         box.setLayoutParams(margins(fill(), ctx, 0, 0, 0, 10));
         return box;
     }
@@ -227,7 +231,7 @@ public final class Ui {
         TextView t = text(ctx, label, 14f, ON_ACCENT, true);
         t.setGravity(Gravity.CENTER);
         t.setPadding(dp(ctx, 16), dp(ctx, 13), dp(ctx, 16), dp(ctx, 13));
-        t.setBackground(ripple(ctx, round(ctx, color, 16), Color.WHITE));
+        t.setBackground(ripple(ctx, round(ctx, color, R_BUTTON), Color.WHITE));
         t.setOnClickListener(l);
         return t;
     }
@@ -237,7 +241,7 @@ public final class Ui {
         TextView t = text(ctx, label, 13.5f, color, true);
         t.setGravity(Gravity.CENTER);
         t.setPadding(dp(ctx, 14), dp(ctx, 11), dp(ctx, 14), dp(ctx, 11));
-        t.setBackground(ripple(ctx, round(ctx, alpha(color, 30), 14), color));
+        t.setBackground(ripple(ctx, round(ctx, alpha(color, 30), R_BUTTON), color));
         t.setOnClickListener(l);
         return t;
     }
@@ -247,7 +251,7 @@ public final class Ui {
         Icon i = new Icon(ctx, glyph, color);
         int p = dp(ctx, 8);
         i.setPadding(p, p, p, p);
-        i.setBackground(ripple(ctx, round(ctx, alpha(color, 22), 12), color));
+        i.setBackground(ripple(ctx, round(ctx, alpha(color, 22), R_CHIP), color));
         i.setOnClickListener(l);
         i.setLayoutParams(new LinearLayout.LayoutParams(dp(ctx, 38), dp(ctx, 38)));
         return i;
@@ -256,8 +260,8 @@ public final class Ui {
     public static TextView chip(Context ctx, String label, boolean active, View.OnClickListener l) {
         TextView t = text(ctx, label, 12.5f, active ? ON_ACCENT : DIM, true);
         t.setPadding(dp(ctx, 14), dp(ctx, 8), dp(ctx, 14), dp(ctx, 8));
-        t.setBackground(ripple(ctx, active ? round(ctx, ACCENT, 20)
-                : outline(ctx, SURFACE_2, STROKE, 20), ACCENT));
+        t.setBackground(ripple(ctx, active ? round(ctx, ACCENT, R_CHIP)
+                : outline(ctx, SURFACE_2, STROKE, R_CHIP), ACCENT));
         t.setOnClickListener(l);
         return t;
     }
@@ -283,7 +287,7 @@ public final class Ui {
         e.setHintTextColor(FAINT);
         e.setTypeface(REG);
         e.setTextSize(14f);
-        e.setBackground(outline(ctx, SURFACE_2, STROKE, 14));
+        e.setBackground(outline(ctx, SURFACE_2, STROKE, R_INPUT));
         e.setPadding(dp(ctx, 14), dp(ctx, 12), dp(ctx, 14), dp(ctx, 12));
         return e;
     }

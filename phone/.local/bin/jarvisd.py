@@ -59,7 +59,10 @@ HOME = os.path.expanduser("~")
 HERMES = os.path.join(HOME, ".hermes")
 APP = "/data/data/com.termux/files/usr/lib/hermes-agent/app"
 sys.path.insert(0, APP)
+sys.path.insert(0, os.path.join(HOME, ".local", "bin"))
 os.chdir(HOME)
+
+import jarvis_fast as fast  # noqa: E402  (deterministic device actions, no model)
 
 VERSION = "0.1"
 PORT = int(os.environ.get("JARVIS_PORT", "8780"))
@@ -514,7 +517,213 @@ def catalog():
     return {"models": models, "aliases": aliases, "current": current,
             "toolsets": TOOLSETS, "presets": {"fast": FAST_TOOLSETS},
             "reasoning": ["none", "minimal", "low", "medium", "high"],
+            "chips": fast.CHIPS,
             "personas": [{"id": "jarvis", "label": "جارویس"}]}
+
+
+@app.post("/fast")
+async def fast_run(req: Request):
+    """Deterministic device actions: no model, ~100-300 ms on this phone."""
+    body = await _json(req)
+    intent = str(body.get("intent") or "")
+    args = body.get("args") if isinstance(body.get("args"), dict) else {}
+    loop = asyncio.get_running_loop()
+    res = await loop.run_in_executor(None, fast.run, intent, args)
+    return res
+
+
+@app.get("/media/{name}")
+def media(name: str):
+    if not re.fullmatch(r"jv_[0-9a-f]{10,16}\.png", name):
+        return JSONResponse({"error": "bad name"}, status_code=400)
+    path = os.path.join(os.path.expanduser("~/shots"), name)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "gone"}, status_code=404)
+    return FileResponse(path, media_type="image/png")
+
+
+# ------------------------------------------------------------------------------- setup --
+# First-run path for a stranger's phone. The app never receives an existing key: it only
+# learns whether one is present, and it can write a new one. Writing goes through the same
+# env-file rules as gwctl (`*_API_KEY` / `*_TOKEN`, empty deletes).
+PROVIDERS = [
+    {"id": "google_ai_studio", "label": "Google AI Studio", "key_env": "GEMINI_API_KEY",
+     "key_url": "https://aistudio.google.com/apikey", "voice": True,
+     "models": [
+         {"id": "gemini-3.5-flash-lite", "label": "Gemini 3.5 Flash Lite (fastest)", "tools": True, "vision": True},
+         {"id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash", "tools": True, "vision": True},
+         {"id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash", "tools": True, "vision": True},
+     ]},
+    {"id": "openrouter", "label": "OpenRouter", "key_env": "OPENROUTER_API_KEY",
+     "key_url": "https://openrouter.ai/keys", "voice": False,
+     "models": [
+         {"id": "nvidia/nemotron-3-ultra-550b-a55b:free", "label": "Nemotron 3 Ultra (free)",
+          "tools": True, "vision": False},
+     ]},
+    {"id": "agentrouter", "label": "AgentRouter", "key_env": "AGENTROUTER_API_KEY",
+     "key_url": "https://agentrouter.org", "voice": False,
+     "models": [
+         {"id": "gpt-6.1-sol", "label": "GPT 6.1 Sol", "tools": True, "vision": False},
+     ]},
+]
+KEY_ENV_OK = re.compile(r"^[A-Z0-9_]*(_API_KEY|_TOKEN)$")
+ENV_PATH = os.path.join(HERMES, ".env")
+
+
+def _provider(pid: str) -> Optional[Dict[str, Any]]:
+    for p in PROVIDERS:
+        if p["id"] == pid:
+            return p
+    return None
+
+
+def _env_write(name: str, value: str) -> None:
+    """Replace or append one KEY=value line, atomically, mode 600. Empty deletes it."""
+    lines: List[str] = []
+    had = False
+    if os.path.exists(ENV_PATH):
+        with open(ENV_PATH, encoding="utf-8") as fh:
+            for line in fh:
+                if line.split("=", 1)[0].strip() == name:
+                    had = True
+                    continue
+                lines.append(line if line.endswith("\n") else line + "\n")
+    if value:
+        lines.append("%s=%s\n" % (name, value))
+    tmp = ENV_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.writelines(lines)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, ENV_PATH)
+    if not had and not value:
+        return
+
+
+@app.get("/setup/state")
+def setup_state():
+    cfg = load_config()
+    providers = []
+    for p in PROVIDERS:
+        providers.append(dict(p, has_key=bool(read_env(p["key_env"])),
+                              key_length=len(read_env(p["key_env"]))))
+    model = cfg.get("model") or {}
+    return {"ok": True, "port": PORT, "version": VERSION,
+            "needs_setup": not any(p["has_key"] for p in providers),
+            "config": {"exists": os.path.exists(os.path.join(HERMES, "config.yaml")),
+                       "provider": model.get("provider", ""),
+                       "model": model.get("default", "")},
+            "runtime": {"warm": HUB.warm, "sessions": len(HUB.sessions)},
+            "providers": providers}
+
+
+@app.post("/setup/key")
+async def setup_key(req: Request):
+    body = await _json(req)
+    p = _provider(str(body.get("provider") or ""))
+    if not p:
+        return JSONResponse({"ok": False, "error": "unknown_provider"}, status_code=400)
+    key = str(body.get("key") or "").strip()
+    if not key:
+        return JSONResponse({"ok": False, "error": "empty_key"}, status_code=400)
+    if any(c.isspace() for c in key):
+        return JSONResponse({"ok": False, "error": "key_has_whitespace"}, status_code=400)
+    if "'" in key or '"' in key:
+        return JSONResponse({"ok": False, "error": "key_has_quotes"}, status_code=400)
+    if not KEY_ENV_OK.match(p["key_env"]):
+        return JSONResponse({"ok": False, "error": "key_env_not_allowed"}, status_code=403)
+    try:
+        _env_write(p["key_env"], key)
+    except OSError as exc:
+        return JSONResponse({"ok": False, "error": "env_write_failed", "detail": str(exc)},
+                            status_code=500)
+    # the warm agent captured the old environment; drop it so the next turn re-reads
+    for s in HUB.sessions.values():
+        s.agent = None
+    return {"ok": True, "provider": p["id"], "key_env": p["key_env"],
+            "key_length": len(key), "agents_cleared": True}
+
+
+@app.post("/setup/test")
+async def setup_test(req: Request):
+    """One tiny call to the provider with the stored key. Never echoes the key."""
+    body = await _json(req)
+    p = _provider(str(body.get("provider") or ""))
+    if not p:
+        return {"ok": False, "status": 0, "error": "unknown_provider"}
+    key = read_env(p["key_env"])
+    if not key:
+        return {"ok": False, "status": 0, "error": "no_key"}
+    model = str(body.get("model") or p["models"][0]["id"])
+    started = now()
+    try:
+        import httpx
+        if p["id"] == "google_ai_studio":
+            url = ("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
+            headers = {"Authorization": "Bearer " + key}
+            payload = {"model": model, "max_tokens": 16,
+                       "messages": [{"role": "user", "content": "reply with: ok"}]}
+        elif p["id"] == "openrouter":
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {"Authorization": "Bearer " + key}
+            payload = {"model": model, "max_tokens": 16,
+                       "messages": [{"role": "user", "content": "reply with: ok"}]}
+        else:  # agentrouter talks the Anthropic messages shape
+            url = "https://agentrouter.org/v1/messages"
+            headers = {"x-api-key": key, "anthropic-version": "2023-06-01",
+                       "User-Agent": "claude-cli/1.0.0 (external, cli)"}
+            payload = {"model": model, "max_tokens": 16,
+                       "messages": [{"role": "user", "content": "reply with: ok"}]}
+        async with httpx.AsyncClient(timeout=45) as client:
+            r = await client.post(url, headers=headers, json=payload)
+        ms = int((now() - started) * 1000)
+        if r.status_code != 200:
+            kind = "quota" if r.status_code == 429 else ("auth" if r.status_code in (401, 403)
+                                                         else "bad_model" if r.status_code == 404
+                                                         else "http_%d" % r.status_code)
+            return {"ok": False, "status": r.status_code, "ms": ms, "error": kind,
+                    "detail": r.text[:200]}
+        return {"ok": True, "status": 200, "ms": ms, "reply": r.text[:200], "provider": p["id"]}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "status": 0, "error": "network",
+                "detail": "%s: %s" % (type(exc).__name__, exc)}
+
+
+@app.post("/setup/model")
+async def setup_model(req: Request):
+    body = await _json(req)
+    provider = str(body.get("provider") or "")
+    model = str(body.get("model") or "")
+    if not provider or not model:
+        return JSONResponse({"ok": False, "error": "provider and model required"},
+                            status_code=400)
+    cfg = load_config()
+    previous = (cfg.get("model") or {})
+    try:
+        import shutil
+        backup_dir = os.path.join(HERMES, "hcontrol-backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        shutil.copy2(os.path.join(HERMES, "config.yaml"),
+                     os.path.join(backup_dir, "config-%d.yaml" % int(now())))
+    except OSError:
+        pass
+    code, out = _hermes("config", "set", "model.provider", provider)
+    code2, out2 = _hermes("config", "set", "model.default", model)
+    for s in HUB.sessions.values():
+        s.agent = None
+    return {"ok": code == 0 and code2 == 0, "provider": provider, "model": model,
+            "previous": {"provider": previous.get("provider", ""),
+                         "model": previous.get("default", "")},
+            "restart_required": False, "detail": (out + " " + out2)[-200:]}
+
+
+def _hermes(*args: str) -> tuple:
+    import subprocess
+    try:
+        p = subprocess.run(["hermes", *args], capture_output=True, text=True, timeout=60,
+                           env=dict(os.environ, HOME=HOME))
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return 127, str(exc)
 
 
 @app.post("/session/new")

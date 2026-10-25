@@ -1,0 +1,702 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# ============================================================================
+# jarvis-setup — installer for Jarvis (Android console + on-phone agent daemon)
+# on a phone that has nothing but Termux.
+#
+#   sh "$HOME/hermes-control/phone/.local/bin/jarvis-setup"        # full install
+#   sh …/jarvis-setup --dry-run                                   # print every action, change nothing
+#   sh …/jarvis-setup --key-only                                  # only (re)store a provider key
+#   sh …/jarvis-setup --port 8781 --no-boot                       # other port, no Termux:Boot hook
+#   sh …/jarvis-setup -h
+#
+# What it does, in order:
+#   1. checks we run inside Termux ($PREFIX contains com.termux) and that python3 + pip exist
+#   2. tries to install the `termux-api` helpers (optional: never fatal)
+#   3. creates ~/.hermes, writes a MINIMAL config.yaml (only when none exists) and puts one
+#      provider API key into ~/.hermes/.env with mode 600 — the key is never echoed
+#   4. copies jarvisd.py, gwctl.py, hermes-svc (+ any phone-* helpers present) into ~/.local/bin
+#   5. starts gwctl and jarvis through hermes-svc and installs a Termux:Boot hook
+#   6. prints next steps (pair the app, open it)
+#
+# Exit codes: 0 ok · 1 usage error · 2 environment/runtime problem ·
+#             3 could not write the key or the config file
+#
+# Invariants — keep them when editing:
+#   * POSIX sh only: `set -u`, every expansion quoted, no arrays, no `local`, no bashisms.
+#     Termux's sh is bash, but this file must also parse under dash (switch ports, CI).
+#   * A key is NEVER echoed and never passed as a command-line argument: argv is visible in
+#     `ps`. It travels stdin -> shell variable -> ~/.hermes/.env (mode 600) and nowhere else.
+#   * An existing ~/.hermes/config.yaml is never rewritten. A foreign
+#     ~/.termux/boot/start.sh is never clobbered (we write jarvis.sh beside it instead).
+#   * --dry-run prints the plan, asks for no secret and changes nothing.
+#   * Lint: `shellcheck -s sh jarvis-setup`. Keep LF endings (.gitattributes enforces it).
+# ============================================================================
+set -u
+
+DEFAULT_PORT=8780
+DRY=0
+KEY_ONLY=0
+NO_BOOT=0
+PORT=""
+
+umask 077
+
+# --------------------------------------------------------------------------- helpers --
+say() { printf '%s\n' "$*"; }
+warn() { printf '! %s\n' "$*" >&2; }
+die() {
+  _code=$1
+  shift
+  printf 'x %s\n' "$*" >&2
+  exit "$_code"
+}
+
+# Run a command, or only describe it under --dry-run.
+do_cmd() {
+  if [ "$DRY" -eq 1 ]; then
+    printf '  [dry-run] %s\n' "$*"
+    return 0
+  fi
+  "$@"
+}
+
+# A human is (probably) attached: a tty on stdin, or a controlling terminal we can open.
+interactive() { [ -t 0 ] || [ -r /dev/tty ]; }
+
+# One visible answer. Reads /dev/tty when stdin is a pipe (`curl … | sh` still works).
+ask_reply=""
+ask_line() {
+  printf '%s' "$1" >&2
+  if [ -r /dev/tty ]; then
+    IFS= read -r ask_reply < /dev/tty || ask_reply=""
+  else
+    IFS= read -r ask_reply || ask_reply=""
+  fi
+  printf '\n' >&2
+}
+
+# Read a secret with echo off and print it to stdout. Nothing is logged.
+restore_echo() {
+  stty echo 2>/dev/null || :
+  stty echo < /dev/tty 2>/dev/null || :
+  return 0
+}
+trap 'restore_echo; exit 130' INT TERM HUP
+
+read_secret() {
+  printf '%s' "$1" >&2
+  _secret=""
+  if [ -r /dev/tty ]; then
+    stty -echo < /dev/tty 2>/dev/null || :
+    IFS= read -r _secret < /dev/tty || _secret=""
+    stty echo < /dev/tty 2>/dev/null || :
+  else
+    stty -echo 2>/dev/null || :
+    IFS= read -r _secret || _secret=""
+    stty echo 2>/dev/null || :
+  fi
+  printf '\n' >&2
+  printf '%s' "$_secret"
+}
+
+# Value of NAME in ~/.hermes/.env (empty when unset). Read-only; never prints keys.
+env_get() {
+  [ -f "$ENV_FILE" ] || return 0
+  grep "^$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2-
+}
+
+# Store NAME=value in ~/.hermes/.env, keeping every other line and mode 600.
+# The value is written by the shell itself: it never appears in argv or in a log.
+env_set() {
+  _name=$1
+  _value=$2
+  _tmp="$ENV_FILE.tmp.$$"
+  : > "$_tmp" || die 3 "ساخت $_tmp نشد."
+  chmod 600 "$_tmp" 2>/dev/null || :
+  if [ -f "$ENV_FILE" ]; then
+    grep -v "^${_name}=" "$ENV_FILE" >> "$_tmp" 2>/dev/null || :
+  fi
+  printf '%s=%s\n' "$_name" "$_value" >> "$_tmp"
+  mv -f "$_tmp" "$ENV_FILE" || die 3 "نوشتن $_tmp در $ENV_FILE نشد."
+  chmod 600 "$ENV_FILE" 2>/dev/null || :
+}
+
+# Does the daemon answer /health on this port? python3 is the one tool we know exists.
+health_ok() {
+  python3 -c 'import sys,urllib.request; urllib.request.urlopen(sys.argv[1], timeout=3).read()' \
+    "http://127.0.0.1:$1/health" >/dev/null 2>&1
+}
+
+usage() {
+  cat <<'USAGE'
+جارویس — نصب یک‌دستوری روی گوشی تازه (Termux)
+
+  sh jarvis-setup [گزینه‌ها]
+
+  --dry-run      همهٔ کارها را چاپ می‌کند و هیچ تغییری نمی‌دهد (کلید هم نمی‌پرسد).
+  --key-only     فقط کلید ارائه‌دهنده را در ~/.hermes/.env می‌نویسد؛
+                 نه اسکریپتی کپی می‌شود، نه سرویسی اجرا، نه هوک بوتی.
+  --no-boot      هوک شروع خودکار (Termux:Boot) نوشته نمی‌شود.
+  --port N       پورت دیمن روی 127.0.0.1 (پیش‌فرض 8780).
+  -h, --help     همین راهنما.
+
+  مثال:
+    sh ~/hermes-control/phone/.local/bin/jarvis-setup --dry-run
+    sh ~/hermes-control/phone/.local/bin/jarvis-setup --port 8781 --no-boot
+
+  کد خروج: 0 موفق · 1 خطای استفاده · 2 مشکل محیط · 3 نوشتن کلید/پیکربندی نشد
+USAGE
+}
+
+# ---------------------------------------------------------------------- arguments --
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY=1 ;;
+    --key-only) KEY_ONLY=1 ;;
+    --no-boot) NO_BOOT=1 ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --port)
+      [ $# -ge 2 ] || die 1 "بعد از --port یک شماره لازم است."
+      PORT=$2
+      shift
+      ;;
+    --port=*)
+      PORT=${1#--port=}
+      ;;
+    *)
+      warn "گزینهٔ ناشناخته: $1"
+      usage
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+if [ -n "$PORT" ]; then
+  case "$PORT" in
+    '' | *[!0-9]*) die 1 "پورت باید عدد باشد: $PORT" ;;
+  esac
+  [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die 1 "پورت بیرون از بازهٔ 1..65535 است: $PORT"
+fi
+
+# ----------------------------------------------------------------------- locations --
+: "${HOME:?HOME is not set — this script must run inside Termux}"
+SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SELF_DIR=""
+[ -n "$SELF_DIR" ] || die 2 "پوشهٔ خود اسکریپت پیدا نشد (dirname \"$0\")."
+
+HERMES="$HOME/.hermes"
+CFG="$HERMES/config.yaml"
+ENV_FILE="$HERMES/.env"
+BIN_DIR="$HOME/.local/bin"
+BOOT_DIR="$HOME/.termux/boot"
+PREFIX_DIR=${PREFIX:-}
+APP_DIR="$PREFIX_DIR/lib/hermes-agent/app"
+VENV_PY="$APP_DIR/venv/bin/python"
+
+say "── نصب جارویس ──"
+[ "$DRY" -eq 1 ] && say "(dry-run: هیچ تغییری اعمال نمی‌شود)"
+
+# ------------------------------------------------------------------- 1. environment --
+termux_ok() {
+  case "$PREFIX_DIR" in
+    *com.termux*) [ -d "$PREFIX_DIR/bin" ] && return 0 ;;
+  esac
+  return 1
+}
+
+if termux_ok; then
+  say "✓ Termux: $PREFIX_DIR"
+elif [ "$DRY" -eq 1 ]; then
+  warn "PREFIX شامل com.termux نیست — این dry-run بیرون از Termux است؛ ادامه می‌دهم."
+else
+  die 2 "این اسکریپت فقط داخل Termux اجرا می‌شود (PREFIX='${PREFIX:-}' شامل com.termux نیست). ترمینال Termux را باز کن و دوباره اجرا کن."
+fi
+
+command -v python3 >/dev/null 2>&1 ||
+  die 2 "python3 پیدا نشد. اول این را اجرا کن: pkg install python"
+python3 -m pip --version >/dev/null 2>&1 ||
+  die 2 "pip کار نمی‌کند (python3 -m pip --version خطا داد). این را اجرا کن: pkg install python"
+say "✓ python3 + pip"
+
+# ------------------------------------------------------------------ 2. termux-api --
+if command -v termux-battery-status >/dev/null 2>&1; then
+  say "✓ termux-api tools"
+else
+  if [ "$DRY" -eq 1 ]; then
+    say "  [dry-run] pkg install -y termux-api"
+  elif command -v pkg >/dev/null 2>&1; then
+    say "… نصب termux-api (اختیاری)"
+    pkg install -y termux-api >/dev/null 2>&1 ||
+      warn "نصب termux-api انجام نشد — اختیاری است، ادامه می‌دهم (بستهٔ termux-api + اپ Termux:API از F-Droid)."
+  else
+    warn "termux-api نیست و pkg هم پیدا نشد — اختیاری است، ادامه می‌دهم."
+  fi
+fi
+
+# ----------------------------------------------------------------------- 3. tmux --
+# hermes-svc runs every service inside tmux; without it nothing starts.
+TMUX_OK=1
+if ! command -v tmux >/dev/null 2>&1; then
+  if [ "$DRY" -eq 1 ]; then
+    say "  [dry-run] pkg install -y tmux"
+    TMUX_OK=0
+  elif command -v pkg >/dev/null 2>&1; then
+    say "… نصب tmux"
+    pkg install -y tmux >/dev/null 2>&1 || :
+    command -v tmux >/dev/null 2>&1 || TMUX_OK=0
+  else
+    TMUX_OK=0
+  fi
+fi
+if [ "$TMUX_OK" -eq 1 ]; then
+  say "✓ tmux"
+else
+  warn "tmux نصب نیست؛ بدون آن hermes-svc سرویسی اجرا نمی‌کند. بعداً: pkg install tmux"
+fi
+
+# --------------------------------------------------------------- 4. port bookkeeping --
+if [ -z "$PORT" ]; then
+  # Reuse the port a previous run recorded, else the default — re-runs stay idempotent.
+  PORT=$(env_get JARVIS_PORT)
+  case "$PORT" in
+    '' | *[!0-9]*) PORT=$DEFAULT_PORT ;;
+  esac
+fi
+
+# ------------------------------------------------------------------ 5. ~/.hermes --
+if [ -d "$HERMES" ]; then
+  say "✓ ~/.hermes هست"
+else
+  do_cmd mkdir -p "$HERMES" || die 2 "ساخت ~/.hermes نشد."
+  [ "$DRY" -eq 1 ] || say "✓ ~/.hermes ساخته شد"
+fi
+
+# Provider presets: base URL, key variable and model list for the four supported
+# providers. These mirror what phone/.hermes/config.yaml uses on the owner's phone.
+set_provider() {
+  case "$1" in
+    google_ai_studio | 1 | "")
+      PROV=google_ai_studio
+      PROV_LABEL="Google AI Studio (Gemini)"
+      PROV_URL="https://aistudio.google.com/apikey"
+      PROV_BASE="https://generativelanguage.googleapis.com/v1beta/openai"
+      PROV_KEY_ENV=GOOGLE_AI_STUDIO_API_KEY
+      PROV_API_MODE=chat_completions
+      PROV_MODEL="gemini-3.5-flash"
+      PROV_MODES='    transport: chat_completions'
+      PROV_MODELS='      gemini-3.5-flash:
+        display_name: Gemini 3.5 Flash
+        supports_tools: true
+        supports_vision: true
+      gemini-3.5-flash-lite:
+        display_name: Gemini 3.5 Flash Lite
+        supports_tools: true
+        supports_vision: true
+      gemini-2.5-flash:
+        display_name: Gemini 2.5 Flash
+        supports_tools: true
+        supports_vision: true'
+      # Voice (STT/TTS in jarvisd) only works with a Gemini key, so only this provider
+      # gets the stt/tts blocks.
+      PROV_VOICE='stt:
+  provider: gemini
+  language: fa
+  gemini:
+    model: gemini-3.5-transcribe
+    api_key_env: GOOGLE_AI_STUDIO_API_KEY
+tts:
+  provider: gemini
+  gemini:
+    voice: Kore
+    model: gemini-3.8-flash-tts
+    api_key_env: GOOGLE_AI_STUDIO_API_KEY
+voice:
+  auto_tts: false'
+      ;;
+    openrouter | 2)
+      PROV=openrouter
+      PROV_LABEL="OpenRouter"
+      PROV_URL="https://openrouter.ai/keys"
+      PROV_BASE="https://openrouter.ai/api/v1"
+      PROV_KEY_ENV=OPENROUTER_API_KEY
+      PROV_API_MODE=chat_completions
+      PROV_MODEL="minimax/minimax-m3.1-flash:free"
+      PROV_MODES='    transport: chat_completions'
+      PROV_MODELS='      - "minimax/minimax-m3.1-flash:free"
+      - "nvidia/nemotron-3-ultra-550b-a55b:free"'
+      PROV_VOICE='# voice (stt/tts) needs a Gemini key: run `sh ~/.local/bin/jarvis-setup --key-only` and pick 1.'
+      ;;
+    groq | 3)
+      PROV=groq
+      PROV_LABEL="Groq"
+      PROV_URL="https://console.groq.com/keys"
+      PROV_BASE="https://api.groq.com/openai/v1"
+      PROV_KEY_ENV=GROQ_API_KEY
+      PROV_API_MODE=chat_completions
+      PROV_MODEL="openai/gpt-oss-120b"
+      PROV_MODES='    transport: chat_completions'
+      PROV_MODELS='      - "openai/gpt-oss-120b"
+      - "moonshotai/kimi-k2-instruct"'
+      PROV_VOICE='# voice (stt/tts) needs a Gemini key: run `sh ~/.local/bin/jarvis-setup --key-only` and pick 1.'
+      ;;
+    agentrouter | 4)
+      PROV=agentrouter
+      PROV_LABEL="AgentRouter"
+      PROV_URL="https://agentrouter.org/console"
+      PROV_BASE="https://agentrouter.org"
+      PROV_KEY_ENV=AGENTROUTER_API_KEY
+      PROV_API_MODE=anthropic_messages
+      PROV_MODEL="gpt-6.1-sol"
+      PROV_MODES='    api_mode: anthropic_messages
+    extra_headers:
+      User-Agent: "claude-cli/1.0.0 (external, cli)"'
+      PROV_MODELS='      gpt-6.1-sol:
+        display_name: GPT 6.1 Sol
+      gpt-6-astra:
+        display_name: GPT 6 Astra'
+      PROV_VOICE='# voice (stt/tts) needs a Gemini key: run `sh ~/.local/bin/jarvis-setup --key-only` and pick 1.'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# Write the minimal config. Called only when ~/.hermes/config.yaml does not exist.
+write_config() {
+  _tmp="$CFG.tmp.$$"
+  cat > "$_tmp" <<YAML || die 3 "نوشتن config.yaml نشد."
+# Minimal Hermes config for a fresh phone, written by jarvis-setup on $(date '+%Y-%m-%d').
+# Hermes adds the rest itself (and stamps its own _config_version) on the next run.
+# This installer never overwrites this file once it exists; delete it to regenerate.
+# API keys are NOT stored here: they live in ~/.hermes/.env (mode 600).
+model:
+  provider: $PROV
+  api_mode: $PROV_API_MODE
+  default: "$PROV_MODEL"
+providers:
+  $PROV:
+    name: "$PROV_LABEL"
+    api: $PROV_BASE
+    key_env: $PROV_KEY_ENV
+    default_model: "$PROV_MODEL"
+$PROV_MODES
+    models:
+$PROV_MODELS
+fallback_providers: []
+$CFG_TZ
+$PROV_VOICE
+YAML
+  chmod 600 "$_tmp" 2>/dev/null || :
+  mv -f "$_tmp" "$CFG" || die 3 "config.yaml جای‌گذاری نشد."
+  say "✓ config.yaml ساخته شد (provider: $PROV)"
+
+  # Cheap YAML sanity check with the interpreter that will actually read the file.
+  if [ -x "$VENV_PY" ]; then
+    if ! "$VENV_PY" -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1], encoding="utf-8"))' \
+      "$CFG" >/dev/null 2>&1; then
+      mv -f "$CFG" "$CFG.broken-$$" 2>/dev/null || :
+      die 3 "config.yaml از نظر YAML معتبر نبود؛ به config.yaml.broken-$$ منتقل شد."
+    fi
+  fi
+}
+
+# Device timezone, when Android exposes it — cron jobs and timestamps depend on it.
+CFG_TZ=""
+DEV_TZ=$(getprop persist.sys.timezone 2>/dev/null || :)
+case "$DEV_TZ" in
+  */*) CFG_TZ="timezone: $DEV_TZ" ;;
+esac
+
+if [ -f "$CFG" ]; then
+  say "✓ config.yaml از قبل هست — به آن دست نمی‌زنم."
+  # Keep the existing provider: importing its key into the wrong place would be a silent bug.
+  set_provider google_ai_studio
+  EXISTING_PROV=$(grep -m1 '^[[:space:]]*provider:' "$CFG" 2>/dev/null | sed 's/.*provider:[[:space:]]*//' | tr -d '"' || :)
+  case "$EXISTING_PROV" in
+    google_ai_studio | openrouter | groq | agentrouter)
+      set_provider "$EXISTING_PROV"
+      say "  ارائه‌دهندهٔ فعلی: $PROV"
+      ;;
+    '')
+      say "  ارائه‌دهنده‌ای در config نبود؛ google_ai_studio فرض می‌شود."
+      ;;
+    *)
+      warn "ارائه‌دهندهٔ config پشتیبانی نمی‌شود ($EXISTING_PROV)؛ کلید برای google_ai_studio پرسیده می‌شود — کلید خودش را با --key-only به شکل دستی اضافه کن."
+      ;;
+  esac
+elif [ "$KEY_ONLY" -eq 1 ]; then
+  # --key-only stores a key and nothing else: no config.yaml, no scripts, no services.
+  set_provider google_ai_studio
+  say "→ key-only: config.yaml ساخته نمی‌شود (فقط کلید)."
+else
+  # First run: ask which provider, then write the matching block.
+  PROV=google_ai_studio
+  set_provider "$PROV"
+  if [ "$DRY" -eq 0 ] && [ "$KEY_ONLY" -eq 0 ] && interactive; then
+    say ""
+    say "کدام ارائه‌دهندهٔ مدل را می‌خواهی؟"
+    say "  1) Google AI Studio — Gemini   (کلید رایگان: $PROV_URL)"
+    say "  2) OpenRouter                  (https://openrouter.ai/keys)"
+    say "  3) Groq                        (https://console.groq.com/keys)"
+    say "  4) AgentRouter                 (https://agentrouter.org/console)"
+    _tries=0
+    while [ "$_tries" -lt 5 ]; do
+      ask_line "انتخاب [1]: "
+      _choice=$(printf '%s' "$ask_reply" | tr -d '[:space:]')
+      [ -n "$_choice" ] || _choice=1
+      if set_provider "$_choice"; then
+        break
+      fi
+      warn "انتخاب نامعتبر: $_choice"
+      _tries=$((_tries + 1))
+    done
+    say "→ $PROV_LABEL"
+  fi
+  if [ "$DRY" -eq 1 ]; then
+    say "  [dry-run] would write ~/.hermes/config.yaml (provider: $PROV, model: $PROV_MODEL)"
+  else
+    write_config
+  fi
+fi
+
+# ---------------------------------------------------------------------- 6. the key --
+prompt_and_store_key() {
+  _have=$(env_get "$PROV_KEY_ENV")
+  if [ -n "$_have" ]; then
+    say "  کلید $PROV_KEY_ENV از قبل هست (${#_have} کاراکتر) — برای نگه‌داشتنش فقط Enter بزن."
+  fi
+  if [ "$DRY" -eq 1 ]; then
+    say "  [dry-run] would ask for $PROV_KEY_ENV and store it in ~/.hermes/.env (600)"
+    return 0
+  fi
+  if ! interactive; then
+    warn "ترمینال تعاملی نیست؛ کلید پرسیده نشد. بعداً: sh ~/.local/bin/jarvis-setup --key-only"
+    return 0
+  fi
+  _new=$(read_secret "کلید $PROV_KEY_ENV ($PROV_URL) — نمایش داده نمی‌شود، بعد Enter: ")
+  # Pasting from a clipboard often brings spaces or a stray CR; keys never contain any.
+  _new=$(printf '%s' "$_new" | tr -d '[:space:]')
+  if [ -z "$_new" ]; then
+    if [ -n "$_have" ]; then
+      say "  ✓ کلید قبلی نگه داشته شد."
+    else
+      warn "کلید خالی بود. بدون کلید جارویس جواب نمی‌دهد؛ بعداً: sh ~/.local/bin/jarvis-setup --key-only"
+    fi
+    return 0
+  fi
+  case "$_new" in
+    *\"* | *\'*)
+      die 3 "کلید شامل کوتیشن است؛ بدون کوتیشن دوباره بچسبان."
+      ;;
+  esac
+  env_set "$PROV_KEY_ENV" "$_new"
+  say "  ✓ کلید در ~/.hermes/.env ذخیره شد (mode 600، بدون چاپ)."
+}
+
+if [ "$KEY_ONLY" -eq 1 ]; then
+  if [ ! -f "$CFG" ]; then
+    warn "config.yaml نیست؛ کلید بدون پیکربندی به کار نمی‌آید. بعد از این، jarvis-setup را بدون --key-only اجرا کن."
+  fi
+  prompt_and_store_key
+  # The warm agent holds the old key until the process restarts.
+  say ""
+  say "── تمام (key-only) ──"
+  [ "$DRY" -eq 1 ] || say "برای اعمال: sh ~/.local/bin/hermes-svc restart jarvis"
+  exit 0
+fi
+
+prompt_and_store_key
+
+# Record the port where the app and the next run can find it.
+CUR_PORT=$(env_get JARVIS_PORT)
+if [ "$CUR_PORT" = "$PORT" ]; then
+  say "✓ JARVIS_PORT=$PORT ثبت است"
+elif [ "$DRY" -eq 1 ]; then
+  say "  [dry-run] would store JARVIS_PORT=$PORT in ~/.hermes/.env"
+else
+  env_set JARVIS_PORT "$PORT"
+  say "✓ JARVIS_PORT=$PORT ثبت شد"
+fi
+
+# ------------------------------------------------------- 7. daemon + helper scripts --
+REQUIRED="jarvisd.py gwctl.py hermes-svc"
+# jarvisd.py does `import jarvis_fast` (deterministic device actions). Without that module
+# the daemon cannot even import, so it is required exactly when the daemon asks for it.
+if grep -qE '^[[:space:]]*(import jarvis_fast|from jarvis_fast)' "$SELF_DIR/jarvisd.py" 2>/dev/null; then
+  REQUIRED="$REQUIRED jarvis_fast.py"
+fi
+# Present on the owner's phone, absent on a fresh one: install what exists, say what is not.
+OPTIONAL="phone-env phone-open phone-tap phone-swipe phone-key phone-type phone-screenshot phone-ui phone-see phone-contacts saat gspeed google-probe probe_jarvis.py probe_api.py probe_api.sh gwctl-start.sh"
+
+_missing=""
+# shellcheck disable=SC2086  # word splitting of the list is intended
+for _f in $REQUIRED; do
+  [ -f "$SELF_DIR/$_f" ] || _missing="$_missing $_f"
+done
+if [ -n "$_missing" ]; then
+  die 2 "این فایل‌ها کنار اسکریپت نیستند:$_missing — مخزن کامل نیست (git clone را کامل بگیر یا فایل‌ها را کنار این اسکریپت بگذار)."
+fi
+
+do_cmd mkdir -p "$BIN_DIR" || die 2 "ساخت ~/.local/bin نشد."
+say "→ نصب اسکریپت‌ها در ~/.local/bin"
+
+install_one() {
+  _src="$SELF_DIR/$1"
+  _dst="$BIN_DIR/$1"
+  if [ -f "$_dst" ] && cmp -s "$_src" "$_dst"; then
+    # Same content: still fix the mode (a checkout on Windows loses the exec bit).
+    [ "$DRY" -eq 1 ] || chmod 700 "$_dst" 2>/dev/null || :
+    say "  = $1"
+    return 0
+  fi
+  if [ -f "$_dst" ]; then
+    # Never lose a hand-edited copy silently (the owner's phone has customised scripts).
+    _bak="$_dst.bak-$(date +%Y%m%d%H%M%S)"
+    do_cmd mv -f "$_dst" "$_bak" || die 2 "پشتیبان‌گیری از $_dst نشد."
+    [ "$DRY" -eq 1 ] || say "  ← نسخهٔ قبلی $1 در ${_bak##*/} نگه داشته شد"
+  fi
+  if [ "$DRY" -eq 1 ]; then
+    printf '  [dry-run] cp %s %s; chmod 700\n' "$_src" "$_dst"
+    return 0
+  fi
+  cp -f "$_src" "$_dst" || die 2 "کپی $1 نشد."
+  chmod 700 "$_dst" 2>/dev/null || :
+  say "  + $1"
+}
+
+# shellcheck disable=SC2086
+for _f in $REQUIRED; do
+  install_one "$_f"
+done
+
+# Keep a copy of the installer too, so `sh ~/.local/bin/jarvis-setup --key-only`
+# works later without the checkout. Identical content is skipped (no self-overwrite loop).
+install_one jarvis-setup
+
+_skipped=""
+# shellcheck disable=SC2086
+for _f in $OPTIONAL; do
+  if [ -f "$SELF_DIR/$_f" ]; then
+    install_one "$_f"
+  else
+    _skipped="$_skipped $_f"
+  fi
+done
+[ -z "$_skipped" ] || say "  (نبود، رد شد:$_skipped — روی گوشی تازه طبیعی است)"
+
+# --------------------------------------------------------- 8. is the runtime here? --
+READY=1
+if [ ! -d "$APP_DIR" ]; then
+  READY=0
+  warn "Hermes agent نصب نیست: $APP_DIR پیدا نشد."
+  warn "jarvisd بدون آن بالا نمی‌آید. اول Hermes را روی همین گوشی نصب کن، بعد دوباره jarvis-setup."
+elif [ ! -x "$VENV_PY" ]; then
+  VENV_PY="$PREFIX_DIR/bin/python3"
+  say "… venv پیدا نشد؛ از python3 سیستمی استفاده می‌شود"
+fi
+
+# The daemon must be able to import itself: that is the real prerequisite check
+# (fastapi/uvicorn/httpx/yaml, jarvis_fast, and the Hermes app dir behind it all).
+daemon_imports() {
+  "$VENV_PY" -c 'import sys,os; sys.path.insert(0, os.path.join(os.path.expanduser("~"), ".local", "bin")); import jarvisd' >/dev/null 2>&1
+}
+
+if [ "$READY" -eq 1 ] && [ "$DRY" -eq 0 ]; then
+  if ! daemon_imports; then
+    READY=0
+    warn "دیمن بالا نمی‌آید: import کردن jarvisd شکست خورد (کتابخانه یا ماژول کم است)."
+    warn "این را اجرا کن: $VENV_PY -m pip install fastapi uvicorn httpx pyyaml"
+    warn "و مطمئن شو فایل‌های نصب‌شده در ~/.local/bin کنار jarvisd.py کامل‌اند (jarvis_fast.py و …)."
+  fi
+fi
+
+# ------------------------------------------------------------- 9. start the services --
+if [ "$DRY" -eq 1 ]; then
+  do_cmd tmux setenv -g JARVIS_PORT "$PORT"
+  do_cmd sh "$BIN_DIR/hermes-svc" start gwctl
+  do_cmd sh "$BIN_DIR/hermes-svc" restart jarvis
+elif [ "$READY" -eq 0 ] || [ "$TMUX_OK" -eq 0 ]; then
+  warn "سرویس‌ها اجرا نشدند (پیش‌نیاز بالایی نیست). فایل‌ها نصب شدند؛ بعد از رفع مشکل دوباره اجرا کن."
+else
+  # New tmux sessions inherit the server's global environment, so this is how the
+  # daemon learns a non-default port (jarvisd reads JARVIS_PORT at import time).
+  tmux setenv -g JARVIS_PORT "$PORT" 2>/dev/null || :
+  say "→ شروع سرویس‌ها"
+  sh "$BIN_DIR/hermes-svc" start gwctl || warn "gwctl شروع نشد."
+  sh "$BIN_DIR/hermes-svc" restart jarvis || warn "jarvis شروع نشد."
+  _i=0
+  _up=0
+  while [ "$_i" -lt 20 ]; do
+    if health_ok "$PORT"; then
+      _up=1
+      break
+    fi
+    sleep 1
+    _i=$((_i + 1))
+  done
+  if [ "$_up" -eq 1 ]; then
+    say "✓ دیمن جواب داد: http://127.0.0.1:$PORT/health"
+  else
+    warn "دیمن پس از ۲۰ ثانیه جواب نداد. لاگ: ~/.hermes/jarvis.log"
+    warn "بررسی: sh ~/.local/bin/hermes-svc status jarvis && tail -n 20 ~/.hermes/jarvis.log"
+  fi
+fi
+
+# ---------------------------------------------------------------- 10. boot hook --
+if [ "$NO_BOOT" -eq 1 ]; then
+  say "→ هوک بوت: رد شد (--no-boot)"
+elif [ ! -d "$BOOT_DIR" ]; then
+  say "→ هوک بوت نوشته نشد: ~/.termux/boot نیست."
+  say "  اپ Termux:Boot را از F-Droid نصب کن، یک‌بار بازش کن، بعد دوباره jarvis-setup."
+else
+  hook="$BOOT_DIR/start.sh"
+  if [ -f "$hook" ] && ! grep -q 'jarvis-setup' "$hook" 2>/dev/null; then
+    # Termux:Boot runs every *.sh in that folder, so a second file is enough and
+    # somebody else's start.sh is left untouched.
+    hook="$BOOT_DIR/jarvis.sh"
+    say "  start.sh مال اسکریپت دیگری است؛ هوک در jarvis.sh نوشته می‌شود."
+  fi
+  if [ "$DRY" -eq 1 ]; then
+    printf '  [dry-run] write %s (gwctl + jarvis, JARVIS_PORT=%s)\n' "$hook" "$PORT"
+  else
+    cat > "$hook" <<BOOT || die 2 "نوشتن $hook نشد."
+#!/data/data/com.termux/files/usr/bin/sh
+# Written by jarvis-setup (marker: jarvis-setup) — regenerated on every run, keep edits small.
+# Termux:Boot runs every *.sh in ~/.termux/boot once after the phone starts.
+termux-wake-lock 2>/dev/null || :
+export JARVIS_PORT=$PORT
+tmux setenv -g JARVIS_PORT $PORT 2>/dev/null || :
+sh "\$HOME/.local/bin/hermes-svc" start gwctl
+sh "\$HOME/.local/bin/hermes-svc" restart jarvis
+BOOT
+    chmod 700 "$hook" 2>/dev/null || :
+    say "✓ هوک بوت: ~/.termux/boot/${hook##*/}"
+  fi
+fi
+
+# -------------------------------------------------------------------- 11. next steps --
+say ""
+say "── کارهای بعدی ──"
+say "1) اپ جارویس (jarvis.apk) را روی همین گوشی نصب کن و بازش کن."
+say "2) اگر آدرس خواست: http://127.0.0.1:$PORT"
+say "3) ویزارد اول‌بار: ارائه‌دهنده → کلید → تست → مدل → میکروفون (docs/first-run.md)."
+say "4) اولین پیام را بفرست؛ وضعیت بالا باید «آماده» شود."
+say "5) شروع خودکار پس از ریبوت: اپ Termux:Boot را یک‌بار باز کن."
+say ""
+say "راهنما: docs/install.md · عیب‌یابی: tail -n 20 ~/.hermes/jarvis.log"
+
+if [ "$DRY" -eq 1 ]; then
+  say ""
+  say "── پایان dry-run: هیچ تغییری اعمال نشد ──"
+  exit 0
+fi
+
+if [ "$READY" -eq 0 ] || [ "$TMUX_OK" -eq 0 ] || [ "${_up:-0}" -ne 1 ]; then
+  exit 2
+fi
+exit 0

@@ -55,19 +55,55 @@ final class ChatAdapter extends BaseAdapter {
         bubble.setPadding(Ui.dp(ctx, 14), Ui.dp(ctx, 11), Ui.dp(ctx, 14), Ui.dp(ctx, 10));
 
         if (m.isUser()) {
-            bubble.setBackground(Ui.round(ctx, Ui.USER, 20));
+            bubble.setBackground(Ui.round(ctx, Ui.USER, Ui.R_BUBBLE));
             TextView t = Ui.text(ctx, m.text, 15f, Ui.TEXT, false);
             t.setTextDirection(View.TEXT_DIRECTION_ANY_RTL);
             bubble.addView(t);
             holder.setGravity(Gravity.END);  // own turn: the end edge (left in RTL mirroring)
             holder.addView(bubble, widthLimit());
         } else if (Msg.NOTE.equals(m.role)) {
-            bubble.setBackground(Ui.round(ctx, Ui.alpha(Ui.RED, 26), 16));
+            // A note is a system message: red text on the normal surface, not a red block.
+            bubble.setBackground(Ui.outline(ctx, Ui.SURFACE, Ui.STROKE, Ui.R_BUBBLE));
             bubble.addView(Ui.text(ctx, m.text, 12.5f, Ui.RED, false));
             holder.setGravity(Gravity.CENTER_HORIZONTAL);
             holder.addView(bubble, widthLimit());
+        } else if (Msg.ACTION.equals(m.role)) {
+            // A fast-path action: the same card language as a tool, outside the agent turn.
+            bubble.setBackground(Ui.outline(ctx, Ui.SURFACE, Ui.STROKE, Ui.R_BUBBLE));
+            LinearLayout head = Ui.row(ctx);
+            int tone = m.actionOk ? Ui.GREEN : Ui.RED;
+            head.addView(new Icon(ctx, m.actionOk ? Icon.CHECK : Icon.WARN, tone),
+                    new LinearLayout.LayoutParams(Ui.dp(ctx, 15), Ui.dp(ctx, 15)));
+            head.addView(Ui.text(ctx, m.actionLabel, 12.5f, Ui.TEXT, true),
+                    Ui.margins(Ui.wrap(), ctx, 6, 0, 0, 0));
+            if (m.totalMs != null) {
+                head.addView(Ui.text(ctx, m.totalMs + " ms", 10.5f, Ui.FAINT, false),
+                        Ui.margins(Ui.wrap(), ctx, 8, 0, 0, 0));
+            }
+            bubble.addView(head);
+            if (m.text.length() > 0) {
+                TextView detail = Ui.text(ctx, m.text, 12.5f, Ui.DIM, false);
+                detail.setPadding(0, Ui.dp(ctx, 6), 0, 0);
+                detail.setTextIsSelectable(true);
+                bubble.addView(detail);
+            }
+            if (!m.media.isEmpty()) {
+                android.widget.ImageView shot = new android.widget.ImageView(ctx);
+                shot.setAdjustViewBounds(true);
+                shot.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
+                shot.setBackground(Ui.round(ctx, Ui.SURFACE_2, Ui.R_CHIP));
+                // A preview, not the artefact: cap the height so one screenshot cannot
+                // swallow the transcript. Tapping opens it full-size through the message menu.
+                int h = Ui.dp(ctx, 220);
+                bubble.addView(shot, Ui.margins(
+                        new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, h),
+                        ctx, 0, 8, 0, 0));
+                Img.load(shot, m.media);
+            }
+            holder.setGravity(Gravity.START);
+            holder.addView(bubble, widthLimit());
         } else {
-            bubble.setBackground(Ui.outline(ctx, Ui.SURFACE, Ui.STROKE, 20));
+            bubble.setBackground(Ui.outline(ctx, Ui.SURFACE, Ui.STROKE, Ui.R_BUBBLE));
             for (Msg.ToolEv tool : m.tools) {
                 bubble.addView(toolCard(tool));
             }
@@ -75,7 +111,7 @@ final class ChatAdapter extends BaseAdapter {
             if (m.text.length() == 0 && m.streaming) {
                 t.setText("…");
             } else {
-                t.setText(Md.render(m.text.toString(), Ui.TEAL, Ui.alpha(Ui.TEAL, 26)));
+                t.setText(Md.render(m.text.toString(), Ui.ACCENT, Ui.alpha(Ui.ACCENT, 26)));
             }
             t.setTextDirection(View.TEXT_DIRECTION_ANY_RTL);
             t.setTextIsSelectable(true);
@@ -86,10 +122,10 @@ final class ChatAdapter extends BaseAdapter {
                 foot.addView(Ui.pill(ctx, "در حال نوشتن…", Ui.ACCENT));
             } else {
                 if (m.ttftMs != null) {
-                    foot.addView(Ui.pill(ctx, firstToken(m.ttftMs), Ui.TEAL));
+                    foot.addView(Ui.pill(ctx, firstToken(m.ttftMs), Ui.FAINT));
                 }
                 if (m.model != null && !m.model.isEmpty()) {
-                    foot.addView(Ui.pill(ctx, shortModel(m.model), Ui.DIM),
+                    foot.addView(Ui.pill(ctx, shortModel(m.model), Ui.FAINT),
                             Ui.margins(Ui.wrap(), ctx, 6, 0, 0, 0));
                 }
                 TextView time = Ui.text(ctx, Ui.clock(m.ts), 10.5f, Ui.FAINT, false);
@@ -118,8 +154,10 @@ final class ChatAdapter extends BaseAdapter {
     private View toolCard(Msg.ToolEv tool) {
         LinearLayout card = Ui.col(ctx);
         card.setPadding(Ui.dp(ctx, 10), Ui.dp(ctx, 8), Ui.dp(ctx, 10), Ui.dp(ctx, 8));
-        card.setBackground(Ui.round(ctx, Ui.SURFACE_2, 12));
+        // Nested inside a bordered bubble, so no second border: just a darker fill.
+        card.setBackground(Ui.round(ctx, Ui.SURFACE_2, Ui.R_CHIP));
         LinearLayout head = Ui.row(ctx);
+        // State lives in the icon and its colour only — never in the card background.
         int color = tool.failed ? Ui.RED : tool.done ? Ui.GREEN : Ui.AMBER;
         head.addView(new Icon(ctx, tool.failed ? Icon.WARN : tool.done ? Icon.CHECK : Icon.BOLT,
                 color), new LinearLayout.LayoutParams(Ui.dp(ctx, 15), Ui.dp(ctx, 15)));
