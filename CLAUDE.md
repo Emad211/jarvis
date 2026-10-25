@@ -26,6 +26,10 @@ One repo for both halves of the system. Background history: `../hermes-handoff/H
 - `jarvisd` keeps a **warm in-process `AIAgent`** per session. Measured on this phone
   (2026-10-26): warm turn ≈ 1.8–4 s to first token, `hermes -z` ≈ 13–120 s, cold
   `AIAgent()` ≈ 24 s. Never route chat through `/agent/test` or a fresh `hermes -z`.
+- Device actions do **not** go through the model: `jarvis_fast.py` runs 16 intents over
+  loopback adb (~92 ms/call vs `rish`'s 3 s) and `jarvis_fast.route()` maps plain Persian
+  commands onto them ("تلگرام رو باز کن" → 613 ms end to end). The agent gets the same hands
+  through the `jarvis-fast` CLI + `~/.hermes/skills/mobile/jarvis-fast/SKILL.md`.
 - Hermes also ships an OpenAI-compatible API server (`gateway/platforms/api_server.py`,
   `platforms.api_server.enabled`, key `API_SERVER_KEY`, port 8642) with `/v1/runs` + SSE +
   approvals. It works here, but each run rebuilds an agent and the first one after a gateway

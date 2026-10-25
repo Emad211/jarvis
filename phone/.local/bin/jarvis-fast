@@ -1,0 +1,44 @@
+#!/data/data/com.termux/files/usr/bin/env python
+"""jarvis-fast — one-shot CLI over the deterministic device intents.
+
+The agent uses this instead of raw `rish`/`adb`: the same actions, but through the
+loopback adb bridge (≈90 ms) instead of Shizuku (≈3 s), and with a JSON verdict.
+
+    jarvis-fast open_app '{"name":"telegram"}'
+    jarvis-fast screenshot
+    jarvis-fast tap '{"x":540,"y":1200}'
+    jarvis-fast ui
+    jarvis-fast list
+
+Prints one JSON object: {ok, intent, ms, detail, media?}.
+"""
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.expanduser("~"), ".local", "bin"))
+
+import jarvis_fast as F  # noqa: E402
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] in ("-h", "--help", "list"):
+        print(json.dumps({"intents": sorted(F.INTENTS), "chips": [c["intent"] for c in F.CHIPS]},
+                         ensure_ascii=False))
+        return 0
+    intent = argv[1]
+    args = {}
+    if len(argv) > 2:
+        try:
+            args = json.loads(argv[2])
+        except ValueError:
+            # allow `jarvis-fast open_app telegram` as a shorthand
+            args = {"name": " ".join(argv[2:])}
+    if not isinstance(args, dict):
+        args = {"value": args}
+    print(json.dumps(F.run(intent, args), ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

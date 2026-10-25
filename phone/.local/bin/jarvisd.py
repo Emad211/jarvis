@@ -296,6 +296,9 @@ def build_agent(session: Session, model: str, toolsets: List[str], reasoning: st
         platform="jarvis",
         user_id="emad",
         chat_id=session.id,
+        # The free tier answers 429 in bursts; the chain turns that into a slower answer
+        # instead of an error message.
+        fallback_model=_fallback_chain(),
         stream_delta_callback=on_delta,
         thinking_callback=on_think,
         tool_start_callback=on_tool_start,
@@ -305,6 +308,16 @@ def build_agent(session: Session, model: str, toolsets: List[str], reasoning: st
         clarify_callback=on_clarify,
     )
     return agent, on_approval
+
+
+def _fallback_chain() -> Optional[List[Dict[str, str]]]:
+    """The configured fallback providers, as AIAgent.fallback_model expects them."""
+    cfg = load_config()
+    entries = []
+    for item in cfg.get("fallback_providers") or []:
+        if isinstance(item, dict) and item.get("provider") and item.get("model"):
+            entries.append({"provider": str(item["provider"]), "model": str(item["model"])})
+    return entries or None
 
 
 def _short(value: Any, limit: int = 300) -> str:
