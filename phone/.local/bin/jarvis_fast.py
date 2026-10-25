@@ -467,6 +467,65 @@ CHIPS = [
     {"intent": "ui", "args": {}, "label": "چه روی صفحه است"},
 ]
 
+# --------------------------------------------------------------------- natural routing --
+# A tiny deterministic router for the commands people actually say. It only fires on
+# unambiguous imperative phrasing; anything else falls through to the agent, which is
+# slower but can think. This is what makes "تلگرام رو باز کن" feel instant.
+_APP_PATTERNS = [
+    re.compile(r"^(?:برنامه‌?ی?\s+)?(?P<app>.+?)\s+(?:رو|را)\s+باز\s*کن", re.I),
+    re.compile(r"^(?P<app>.+?)\s+رو\s+باز\s*کن", re.I),
+    re.compile(r"^open\s+(?P<app>.+)$", re.I),
+    re.compile(r"^launch\s+(?P<app>.+)$", re.I),
+]
+_ROUTE_SIMPLE = [
+    (re.compile(r"^(?:اسکرین\s*شات|اسکرین‌شات|عکس\s+(?:از\s+)?صفحه|screenshot)$", re.I),
+     "screenshot", {}, "اسکرین‌شات"),
+    (re.compile(r"^(?:چه\s+)?ساعت\s+چنده?$|^چه\s+ساعتیه$|^time$", re.I),
+     "info", {"what": "time"}, "ساعت"),
+    (re.compile(r"^(?:چقدر|چند\s+درصد|وضعیت)\s*باتری$|^باتری$|^battery$", re.I),
+     "battery", {}, "باتری"),
+    (re.compile(r"^(?:برو\s+)?خانه$|^home$", re.I), "key", {"name": "home"}, "خانه"),
+    (re.compile(r"^(?:برگرد|بازگشت|back)$", re.I), "key", {"name": "back"}, "برگشت"),
+    (re.compile(r"^(?:برنامه‌های\s+)?اخیر$|^recents$", re.I),
+     "key", {"name": "recents"}, "برنامه‌های اخیر"),
+    (re.compile(r"^(?:نوار\s+)?اعلان‌?ها?$|^notifications?$", re.I),
+     "notifications", {}, "اعلان‌ها"),
+    (re.compile(r"^(?:صدا|صدای?)\s*(?:رو)?\s*(?:بیشتر|بالا|زیاد)$|^volume\s*up$", re.I),
+     "volume", {"action": "up"}, "صدای بیشتر"),
+    (re.compile(r"^(?:صدا|صدای?)\s*(?:رو)?\s*(?:کمتر|پایین)$|^volume\s*down$", re.I),
+     "volume", {"action": "down"}, "صدای کمتر"),
+    (re.compile(r"^(?:بی\s*صدا|mute)$", re.I), "volume", {"action": "mute"}, "بی‌صدا"),
+    (re.compile(r"^(?:وای\s*فای|وایفای|wifi)\s*(?:رو)?\s*(?:روشن|باز\s*کن)$", re.I),
+     "wifi", {"action": "on"}, "وای‌فای روشن"),
+    (re.compile(r"^چه\s+روی\s+صفحه\s+است$|^چی\s+روی\s+صفحه\s+است$|^screen$", re.I),
+     "ui", {}, "چه روی صفحه است"),
+    (re.compile(r"^(?:فضای|حافظه)\s*(?:ذخیره|خالی)?$|^storage$", re.I),
+     "info", {"what": "storage"}, "فضای ذخیره"),
+]
+_BRIGHTNESS = re.compile(r"^(?:روشنایی|نور\s+صفحه)\s*(?:رو)?\s*(\d{1,3})\s*(?:درصد|٪)?", re.I)
+
+
+def route(text: str) -> Optional[Dict[str, Any]]:
+    """Map a short command to a fast intent, or None to let the agent handle it."""
+    t = (text or "").strip().replace("ي", "ی").replace("ك", "ک")
+    if not t or len(t) > 60:
+        return None
+    for pattern, intent, args, label in _ROUTE_SIMPLE:
+        if pattern.match(t):
+            return {"intent": intent, "args": args, "label": label}
+    m = _BRIGHTNESS.match(t)
+    if m:
+        return {"intent": "brightness", "args": {"percent": int(m.group(1))},
+                "label": "روشنایی " + m.group(1) + "٪"}
+    for pattern in _APP_PATTERNS:
+        m = pattern.match(t)
+        if m:
+            app = m.group("app").strip(" .!،")
+            if 0 < len(app) <= 30:
+                return {"intent": "open_app", "args": {"name": app},
+                        "label": "باز کردن " + app}
+    return None
+
 
 def run(intent: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     fn = INTENTS.get(intent)

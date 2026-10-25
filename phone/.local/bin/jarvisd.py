@@ -766,14 +766,54 @@ async def session_turn(sid: str, req: Request):
     loop = asyncio.get_running_loop()
     s.cancel.clear()
 
-    def worker():
-        run_turn(s, text)
+    # A plain-language command that maps to a device action never wakes the model: the
+    # user gets the answer in the same seconds as a chip tap.
+    routed = fast.route(text)
+    if routed and body.get("fast", True):
+        def worker():
+            run_fast_turn(s, text, routed)
+    else:
+        def worker():
+            run_turn(s, text)
 
     # One daemon thread per turn: run_conversation is synchronous and long-lived, and the
     # agent object must stay on the thread that built it.
     threading.Thread(target=_thread_main, args=(loop, worker), name="turn-" + s.id,
                      daemon=True).start()
-    return {"ok": True, "seq": s.seq}
+    return {"ok": True, "seq": s.seq, "fast": bool(routed)}
+
+
+def run_fast_turn(session: Session, text: str, routed: Dict[str, Any]) -> None:
+    """Answer a routed command with the fast path, shaped like a one-tool agent turn."""
+    session.busy = True
+    session.turn_seq += 1
+    turn_id = session.turn_seq
+    started = now()
+    session.emit("turn.start", {"turn": turn_id, "text": text[:4000], "mode": "fast"})
+    session.messages.append({"role": "user", "text": text, "ts": started})
+    label = routed.get("label") or routed.get("intent", "")
+    call_id = "fast_%d" % int(started * 1000)
+    session.emit("tool.start", {"id": call_id, "name": "fast:" + str(routed.get("intent")),
+                                "args": _short(routed.get("args"), 200)})
+    try:
+        res = fast.run(str(routed.get("intent")), routed.get("args") or {})
+        session.emit("tool.end", {"id": call_id, "name": "fast:" + str(routed.get("intent")),
+                                  "result": _short(res.get("detail"), 400)})
+        detail = res.get("detail") or ("انجام شد" if res.get("ok") else "نشد")
+        reply = label + ": " + detail if res.get("ok") else label + " نشد — " + detail
+        session.emit("text.delta", {"text": reply})
+        session.messages.append({"role": "assistant", "text": reply, "ts": now(),
+                                 "ms": int(res.get("ms") or 0), "fast": True})
+        session.emit("turn.end", {"turn": turn_id, "ms": int((now() - started) * 1000),
+                                  "reply": reply, "fast": True,
+                                  "media": res.get("media", "")})
+    except Exception as exc:  # noqa: BLE001
+        session.emit("error", {"text": "%s: %s" % (type(exc).__name__, exc)})
+        session.emit("turn.end", {"turn": turn_id, "ms": int((now() - started) * 1000),
+                                  "reply": "", "failed": True})
+    finally:
+        session.busy = False
+        session.updated = now()
 
 
 def _thread_main(loop, fn):

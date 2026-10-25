@@ -84,19 +84,28 @@ id so a session is stable across app restarts.
 
 1. **No process spawn per turn.** `hermes -z "…"` costs ~13 s before the model is even
    called (measured). A warm `AIAgent` skips interpreter start, imports, config parse and
-   MCP handshake.
-2. **Warm HTTP client.** The provider client is built once per agent and reused, so TLS
-   setup is paid once.
-3. **Two-tier model choice.** A tiny router model (`gemini-3.5-flash-lite`, reasoning none)
-   handles "what does the user want" for short commands; the working model
-   (`gemini-3.5-flash`) does the real turn. Configurable per session.
-4. **Local fast path** (phase 2): a fixed set of device intents (open app, screenshot, tap,
-   type, wifi toggle, volume, screenshot→OCR) executes through `rish`/`adb` **without any
-   LLM call**, emitted as a normal tool event so the UI looks identical. Target: <300 ms.
-5. **Streaming everywhere.** First token reaches the UI as soon as the provider produces
+   MCP handshake: warm turns answer with their first token in 1.8–4 s.
+2. **No model at all for device actions.** `jarvis_fast.py` maps both chips and plain
+   language ("تلگرام رو باز کن", "ساعت چنده", "اسکرین‌شات") onto 16 deterministic intents
+   through loopback `adb` — 92 ms per shell call instead of `rish`'s 3 s. Measured
+   end-to-end through the daemon: open_app 613 ms, time 277 ms, battery 223 ms,
+   screenshot ~1 s. The router only fires on unambiguous imperatives; everything else goes
+   to the agent.
+3. **Two-tier model choice.** Lite + reasoning off by default for chats; the picker raises
+   it per session, and rebuilding the agent for a stronger model is one lazy step.
+4. **Streaming everywhere.** First token reaches the UI as soon as the provider produces
    it; tool cards appear at call time, not at turn end.
-6. **Event replay.** SSE keeps the last 500 events per session with sequence numbers, so a
+5. **Event replay.** SSE keeps the last 600 events per session with sequence numbers, so a
    reconnect (or an app restart) resumes mid-turn instead of losing the answer.
+
+## First run on a fresh phone
+
+`phone/.local/bin/jarvis-setup` (dry-run verified on the device) checks Termux, python,
+tmux and Hermes, writes a minimal config only when none exists, stores the provider key in
+`~/.hermes/.env` (mode 600), installs the helper scripts, starts `gwctl` + `jarvis`, and
+adds a Termux:Boot hook. The app's own wizard (menu → راه‌اندازی اولیه, or automatic when no
+key exists) walks provider → key → live `/setup/test` → default model, and never displays an
+existing key. `docs/install.md` is the human-facing version.
 
 ## Roadmap
 
