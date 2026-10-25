@@ -59,6 +59,11 @@ abstract class Screen {
         inFlight = false;
         box.removeAllViews();
         box.addView(a.errorCard(what, message));
+        // The real fix for "gwctl is asleep" is always the same: ask Termux to run boot.
+        if (!a.reachable) {
+            box.addView(Ui.button(a, "بیدار کردن سرویس‌ها", Ui.AMBER, v -> a.wakeServer()),
+                    Ui.margins(Ui.fill(), a, 0, 4, 0, 0));
+        }
     }
 
     /** Whether this tab should auto-refresh every few seconds while visible. */

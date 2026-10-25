@@ -77,13 +77,26 @@ final class ModelsScreen extends Screen {
             num.setBackground(Ui.round(a, Ui.alpha(Ui.ACCENT, 30), 10));
             r.addView(num, new LinearLayout.LayoutParams(Ui.dp(a, 28), Ui.dp(a, 28)));
             LinearLayout texts = Ui.col(a);
-            texts.addView(Ui.oneLine(Ui.ltr(a, e[1], 13f, Ui.TEXT, true)));
+            TextView id = Ui.oneLine(Ui.ltr(a, e[1], 13f, Ui.TEXT, true));
+            // The row is too narrow for openrouter ids; long-press shows the full one.
+            id.setOnLongClickListener(v -> {
+                a.toast(e[0] + " / " + e[1]);
+                return true;
+            });
+            texts.addView(id);
             texts.addView(Ui.ltr(a, e[0], 11f, Ui.DIM, false));
             texts.setOnClickListener(v -> test(e[0], e[1]));
             r.addView(texts, Ui.margins(Ui.weight(1f), a, 10, 0, 6, 0));
-            r.addView(Ui.iconButton(a, Icon.UP, Ui.DIM, v -> move(idx, -1)));
-            r.addView(Ui.iconButton(a, Icon.DOWN, Ui.DIM, v -> move(idx, 1)),
-                    Ui.margins(new LinearLayout.LayoutParams(Ui.dp(a, 38), Ui.dp(a, 38)), a, 4, 0, 0, 0));
+            // In an RTL row the first child is the rightmost: DOWN (towards higher index)
+            // goes on the left, UP on the right, matching where the neighbours are.
+            boolean canDown = idx < chain.size() - 1;
+            r.addView(canDown ? Ui.iconButton(a, Icon.DOWN, Ui.DIM, v -> move(idx, 1))
+                    : Ui.iconButton(a, Icon.DOWN, Ui.alpha(Ui.DIM, 70), null),
+                    Ui.margins(new LinearLayout.LayoutParams(Ui.dp(a, 38), Ui.dp(a, 38)), a, 0, 0, 4, 0));
+            boolean canUp = idx > 0;
+            r.addView(canUp ? Ui.iconButton(a, Icon.UP, Ui.DIM, v -> move(idx, -1))
+                    : Ui.iconButton(a, Icon.UP, Ui.alpha(Ui.DIM, 70), null),
+                    Ui.margins(new LinearLayout.LayoutParams(Ui.dp(a, 38), Ui.dp(a, 38)), a, 0, 0, 4, 0));
             r.addView(Ui.iconButton(a, Icon.TRASH, Ui.RED, v -> {
                 chain.remove(idx);
                 chainDirty = true;
@@ -96,15 +109,15 @@ final class ModelsScreen extends Screen {
                     Ui.AMBER, false));
         }
         LinearLayout acts = Ui.row(a);
-        acts.addView(Ui.tonal(a, "+ افزودن", Ui.ACCENT, v -> addToChain()), Ui.weight(1f));
+        acts.addView(Ui.tonal(a, "+ افزودن", Ui.ACCENT, v -> addToChain()), Ui.wrap());
         if (chainDirty) {
             acts.addView(Ui.button(a, "ذخیره‌ی زنجیره", Ui.GREEN, v -> saveChain()),
-                    Ui.margins(Ui.weight(1f), a, 8, 0, 0, 0));
+                    Ui.margins(Ui.weight(1f), a, 0, 0, 8, 0));
         }
         list.addView(acts, Ui.margins(Ui.fill(), a, 0, 12, 0, 0));
         add(list);
         TextView hint = Ui.text(a, "روی هر مدل بزن تا تست شود. پرووایدرهایی که کلید ندارند خودکار رد می‌شوند؛ "
-                + "کلیدها را در تب «کلیدها» وارد کن.", 11.5f, Ui.FAINT, false);
+                + "کلیدها را در تب «کلیدها» وارد کن.", 11.5f, Ui.DIM, false);
         hint.setPadding(Ui.dp(a, 6), 0, Ui.dp(a, 6), 0);
         add(hint);
 

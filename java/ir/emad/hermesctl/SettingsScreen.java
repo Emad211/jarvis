@@ -16,6 +16,10 @@ final class SettingsScreen extends Screen {
     private final JSONObject version = new JSONObject();
     /** Health checks hit the network (~10-20 s), so only run them on open and on demand. */
     private boolean runChecks = true;
+    /** True once the first /config render happened; later redraws never reset the tab. */
+    private boolean loadedOnce;
+    /** True while the first render still lacks the health checks. */
+    private boolean progress;
 
     SettingsScreen(MainActivity a) {
         super(a);
@@ -32,6 +36,14 @@ final class SettingsScreen extends Screen {
                     done(this::render);
                 }, m -> done(this::render));
             }, m -> done(this::render));
+            // /checks probes the VPN, DNS, Telegram and every provider (~10-30 s on this
+            // phone). Draw the settings we already have instead of a blank tab, then
+            // draw again with the health rows once they arrive.
+            if (!loadedOnce) {
+                loadedOnce = true;
+                progress = runChecks;
+                done(this::render);
+            }
             if (!runChecks) {
                 rest.run();
                 return;
@@ -39,8 +51,12 @@ final class SettingsScreen extends Screen {
             runChecks = false;
             Api.get("/checks", 120000, ch -> {
                 MainActivity.copyInto(checks, ch);
+                progress = false;
                 rest.run();
-            }, m -> rest.run());
+            }, m -> {
+                progress = false;
+                rest.run();
+            });
         }, m -> failed("تنظیمات", m));
     }
 
@@ -53,6 +69,7 @@ final class SettingsScreen extends Screen {
         section("سلامت");
         LinearLayout hc = Ui.card(a);
         JSONArray list = J.arr(checks, "checks");
+        boolean checking = list.length() == 0 && progress;
         for (int i = 0; i < list.length(); i++) {
             JSONObject c = J.at(list, i);
             boolean ok = J.b(c, "ok");
@@ -67,7 +84,7 @@ final class SettingsScreen extends Screen {
                     ms > 0 ? Ui.text(a, ms + " ms", 11f, Ui.FAINT, false) : null, null));
         }
         if (list.length() == 0) {
-            hc.addView(Ui.text(a, "نتیجه‌ای نیامد", 12.5f, Ui.DIM, false));
+            hc.addView(Ui.text(a, checking ? "در حال بررسی…" : "نتیجه‌ای نیامد", 12.5f, Ui.DIM, false));
         }
         hc.addView(Ui.tonal(a, "بررسی دوباره", Ui.ACCENT, v -> {
             runChecks = true;

@@ -43,6 +43,7 @@ public class MainActivity extends Activity {
     private View headerDot;
     private TextView headerTitle;
     private TextView headerSub;
+    private TextView headerModel;
     private int tab;
 
     /** Latest /status payload; screens read it instead of fetching it again. */
@@ -113,20 +114,33 @@ public class MainActivity extends Activity {
         setContentView(root);
 
         LinearLayout header = Ui.row(this);
-        header.setPadding(Ui.dp(this, 20), Ui.dp(this, 18), Ui.dp(this, 14), Ui.dp(this, 10));
+        // 16dp on both sides, so the header lines up with the cards below it.
+        header.setPadding(Ui.dp(this, 16), Ui.dp(this, 18), Ui.dp(this, 16), Ui.dp(this, 10));
         root.addView(header, Ui.fill());
 
+        // Titles hug the start edge; the slack goes to the spacer, so the refresh button
+        // sits right next to the title instead of across the screen.
         LinearLayout titles = Ui.col(this);
+        titles.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        // The model id is the half that ellipsizes; the state word keeps its width.
+        titles.setMinimumWidth(0);
         LinearLayout titleRow = Ui.row(this);
         headerDot = Ui.dot(this, Ui.FAINT, 10);
         titleRow.addView(headerDot);
         headerTitle = Ui.text(this, "هرمس", 22f, Ui.TEXT, true);
         titleRow.addView(headerTitle, Ui.margins(Ui.wrap(), this, 10, 0, 0, 0));
         titles.addView(titleRow);
-        headerSub = Ui.oneLine(Ui.text(this, "در حال اتصال…", 12f, Ui.DIM, false));
-        headerSub.setPadding(0, Ui.dp(this, 6), 0, 0);
-        titles.addView(headerSub);
-        header.addView(titles, Ui.weight(1f));
+        // One line for the state word, then the model id: the id is the part that ellipsizes.
+        LinearLayout subRow = Ui.row(this);
+        subRow.setPadding(0, Ui.dp(this, 6), 0, 0);
+        headerSub = Ui.text(this, "در حال اتصال…", 12f, Ui.DIM, false);
+        subRow.addView(headerSub);
+        headerModel = Ui.oneLine(Ui.ltr(this, "", 12f, Ui.FAINT, false));
+        // zero min-width so the id yields space before the row overflows the title column
+        headerModel.setMinWidth(0);
+        subRow.addView(headerModel, Ui.margins(Ui.weight(1f), this, 6, 0, 0, 0));
+        titles.addView(subRow);
+        header.addView(titles);
         header.addView(Ui.iconButton(this, Icon.REFRESH, Ui.ACCENT, v -> {
             pollStatus();
             current().refresh();
@@ -147,7 +161,7 @@ public class MainActivity extends Activity {
             int p = Ui.dp(this, 4);
             icon.setPadding(Ui.dp(this, 16), p, Ui.dp(this, 16), p);
             item.addView(icon);
-            TextView label = Ui.text(this, LABELS[i], 11f, Ui.FAINT, false);
+            TextView label = Ui.oneLine(Ui.text(this, LABELS[i], 11f, Ui.FAINT, false));
             label.setPadding(0, Ui.dp(this, 4), 0, 0);
             item.addView(label);
             item.setOnClickListener(v -> select(index));
@@ -213,13 +227,27 @@ public class MainActivity extends Activity {
             headerSub.setText("سرویس کنترل جواب نمی‌دهد — لمس کن تا بیدار شود");
             headerSub.setTextColor(Ui.RED);
             headerSub.setOnClickListener(v -> wakeServer());
+            headerModel.setText("");
+            headerModel.setOnClickListener(null);
             return;
         }
         int color = stateColor();
         headerDot.setBackground(Ui.round(this, color, 10));
         headerSub.setTextColor(Ui.DIM);
         headerSub.setOnClickListener(null);
-        headerSub.setText(stateLabel() + "  ·  " + J.str(status, "model", "—"));
+        headerSub.setText(stateLabel());
+        headerModel.setText(J.str(status, "model", ""));
+        // The model line only repeats the hero card when the bot answers in Telegram;
+        // while it is stuck offline it is the fastest way to restart it.
+        String tg = J.str(status, "telegram", "");
+        boolean stuck = "retrying".equals(tg) || "disconnected".equals(tg) || "error".equals(tg);
+        headerModel.setTextColor(stuck ? Ui.AMBER : Ui.FAINT);
+        if (stuck) {
+            headerModel.setOnClickListener(v -> confirm("ری‌استارت ربات",
+                    "ربات به تلگرام وصل نشده. ری‌استارت شود؟", "ری‌استارت", this::restartGateway));
+        } else {
+            headerModel.setOnClickListener(null);
+        }
     }
 
     int stateColor() {

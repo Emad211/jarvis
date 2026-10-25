@@ -183,7 +183,7 @@ final class HomeScreen extends Screen {
         i.setPadding(p, p, p, p);
         i.setBackground(Ui.round(a, Ui.alpha(color, 30), 14));
         t.addView(i);
-        TextView tv = Ui.text(a, label, 12f, Ui.TEXT, true);
+        TextView tv = Ui.oneLine(Ui.text(a, label, 12f, Ui.TEXT, true));
         tv.setPadding(0, Ui.dp(a, 8), 0, 0);
         t.addView(tv);
         t.setOnClickListener(l);
@@ -274,6 +274,8 @@ final class HomeScreen extends Screen {
                 return "پل Antigravity";
             case "router":
                 return "OmniRoute";
+            case "tgwatch":
+                return "نگهبان تلگرام";
             case "gw":
                 return "ربات اصلی";
             default:

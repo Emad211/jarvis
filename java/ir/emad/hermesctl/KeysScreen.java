@@ -41,7 +41,7 @@ final class KeysScreen extends Screen {
                 Ui.divider(a, slots);
             }
             LinearLayout trailing = Ui.row(a);
-            trailing.addView(Ui.iconButton(a, Icon.LINK, Ui.DIM, v -> a.openUrl(url)));
+            trailing.addView(Ui.iconButton(a, Icon.LINK, Ui.ACCENT, v -> a.openUrl(url)));
             trailing.addView(Ui.iconButton(a, set ? Icon.KEY : Icon.PLUS, set ? Ui.GREEN : Ui.ACCENT,
                     v -> editSlot(provider, env, set)),
                     Ui.margins(new LinearLayout.LayoutParams(Ui.dp(a, 38), Ui.dp(a, 38)), a, 6, 0, 0, 0));
@@ -50,7 +50,7 @@ final class KeysScreen extends Screen {
         }
         add(slots);
         TextView note = Ui.text(a, "دکمه‌ی لینک صفحه‌ی ساخت کلید رایگان را باز می‌کند. بعد از ثبت کلید، "
-                + "پرووایدر خودکار وارد زنجیره‌ی جایگزین می‌شود (ری‌استارت لازم است).", 11.5f, Ui.FAINT, false);
+                + "پرووایدر خودکار وارد زنجیره‌ی جایگزین می‌شود (ری‌استارت لازم است).", 11.5f, Ui.DIM, false);
         note.setPadding(Ui.dp(a, 6), 0, Ui.dp(a, 6), 0);
         add(note);
 

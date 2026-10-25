@@ -277,6 +277,12 @@ def gateway_status(profile=None):
     tg_state = tg.get("state") or "unknown"
     fresh = str(state.get("pid") or "") in pids
     overall = "online" if pids and fresh else ("starting" if pids else "offline")
+    # After a VPN drop the gateway burns its 8 connect attempts and then stops retrying on
+    # its own: nothing in the process changes, so it looks "online" while Telegram is dead.
+    # hermes-svc's tgwatch restarts it; surface that so the app can say what is happening.
+    tgwatch = any(s.get("name") == "tgwatch" for s in services())
+    needs_attention = bool(tg.get("needs_attention")) or (
+        tg_state in ("retrying", "disconnected", "error") and tgwatch)
     try:
         model = current_model(load_config(profile))
     except Exception:  # noqa: BLE001
@@ -290,7 +296,7 @@ def gateway_status(profile=None):
         "pids": pids,
         "telegram": tg_state,
         "telegram_error": tg.get("error_message") or "",
-        "needs_attention": bool(tg.get("needs_attention")),
+        "needs_attention": needs_attention,
         "state_fresh": fresh,
         "model": model,
         "version": state.get("code_version") or "",

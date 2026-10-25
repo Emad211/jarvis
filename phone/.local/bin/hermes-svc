@@ -8,7 +8,8 @@
 #
 # Services: gwctl (control API :8777), agy (Antigravity bridge :8790),
 #           router (OmniRoute :20128, if installed), gw (default Hermes gateway),
-#           gw-<profile> (one gateway per Hermes profile that has its own bot token).
+#           gw-<profile> (one gateway per Hermes profile that has its own bot token),
+#           tgwatch (restarts a gateway whose Telegram gave up after a VPN drop).
 #
 # Why tmux and not nohup: a nohup'd gateway launched from the boot shell can silently
 # never come up; tmux gives it a real session that outlives the launching shell.
@@ -33,6 +34,7 @@ spec() {
     gwctl)  echo "$HERMES/gwctl.log|$VENV_PY $HOME/.local/bin/gwctl.py" ;;
     agy)    [ -f "$HOME/agy_bridge.py" ] && echo "$HERMES/bridge.log|$VENV_PY $HOME/agy_bridge.py" ;;
     router) command -v omniroute >/dev/null && echo "$HERMES/router.log|omniroute" ;;
+    tgwatch) echo "$HERMES/hermes-svc.log|sh $HOME/.local/bin/hermes-svc telegram-watch" ;;
     gw)     [ -f "$HERMES/.env" ] && echo "$HERMES/gw-live.log|hermes gateway run --replace" ;;
     gw-*)   p=${1#gw-}; [ -d "$HERMES/profiles/$p" ] && \
               echo "$HERMES/profiles/$p/gw-live.log|hermes -p $p gateway run --replace" ;;
@@ -72,7 +74,72 @@ stop() {
   echo "$1: stopped"
 }
 
-all() { echo gwctl agy router gw $(profiles | sed 's/^/gw-/'); }
+all() { echo gwctl agy router gw tgwatch $(profiles | sed 's/^/gw-/'); }
+
+# One-shot recovery for the case that no restart loop can fix: the gateway starts before
+# the phone's VPN is up, burns its 8 Telegram connect attempts and then sits in
+# `retrying`/`error` for ever — the process is healthy, so the loop never restarts it.
+# Rule: Telegram is reachable from here AND the recorded state has not been `connected`
+# for HEAL_STALE seconds => restart that gateway (after a grace period, at most once per
+# HEAL_GAP seconds). Set HERMES_TELEGRAM_FALLBACK_FIX=off in .env to disable.
+: "${HEAL_INTERVAL:=20}" "${HEAL_GRACE:=150}" "${HEAL_STALE:=300}" "${HEAL_GAP:=300}"
+HEAL_FLAG="$HERMES/telegram-fix.conf"
+
+# Is Telegram actually reachable right now? One real TLS request — Termux has no `getent`,
+# and a raw TCP probe says nothing about the VPN being back.
+telegram_up() {
+  curl -s -o /dev/null -m 8 https://api.telegram.org/
+}
+
+heal_step() {
+  eval "$(grep '^HERMES_TELEGRAM_FALLBACK_FIX=' "$HERMES/.env" 2>/dev/null)"
+  case "${HERMES_TELEGRAM_FALLBACK_FIX:-on}" in off|0|false|no) return 0 ;; esac
+  telegram_up || return 0
+  for svc in gw $(profiles | sed 's/^/gw-/'); do
+    running "$svc" || continue
+    p=$(case "$svc" in gw) echo default ;; *) echo "${svc#gw-}" ;; esac)
+    log="$HERMES/gw-live.log"; [ "$p" = default ] || log="$HERMES/profiles/$p/gw-live.log"
+    mem="$(dirname "$log")/telegram-heal"
+    state=unknown; changed=0; seen=0
+    if [ -f "$mem" ]; then
+      # `read` without redirection consumes the caller's stdin (it hung cron/ssh runs);
+      # the file is "<epoch> <connect-count> <connect-attempt-line>".
+      memline=$(cat "$mem" 2>/dev/null)
+      changed=$(echo "$memline" | cut -d' ' -f1)
+      seen=$(echo "$memline" | cut -d' ' -f2)
+      state=$(echo "$memline" | cut -d' ' -f3-)
+      case "$changed" in ''|*[!0-9]*) changed=0 ;; esac
+      case "$seen" in ''|*[!0-9]*) seen=0 ;; esac
+    fi
+    now=$(date +%s)
+    cur=$(grep '\[Telegram\] Connecting to Telegram' "$log" 2>/dev/null | tail -1 \
+          | sed -n 's/^\([0-9-]* [0-9:]*\),.*/\1/p')
+    [ -n "$cur" ] || cur=unknown
+    hits=$(grep -c 'Telegram\] Connected' "$log" 2>/dev/null)
+    case "$hits" in ''|*[!0-9]*) hits=0 ;; esac
+    if [ "$cur" != "$state" ] || [ "$hits" -gt "$seen" ] || [ "$changed" -eq 0 ]; then
+      # a new connect attempt, or a successful connect, starts a fresh clock: whatever the
+      # gateway was doing before is history.
+      state=$cur; seen=$hits; changed=$now
+      printf '%s %s %s\n' "$changed" "$seen" "$state" > "$mem"
+    fi
+    age=$((now - changed))
+    [ "$age" -ge "$HEAL_GRACE" ] || continue
+    if [ "$seen" -gt 0 ] && [ "$age" -lt "$HEAL_STALE" ]; then
+      # it has been connected before and the quiet stretch is still short: leave it alone
+      continue
+    fi
+    last=$(cat "$HEAL_FLAG-$svc" 2>/dev/null || echo 0)
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    [ $((now - last)) -ge "$HEAL_GAP" ] || continue
+    echo "$(date '+%F %T') telegram reachable but $svc quiet for ${age}s (state: $cur) -> restart" \
+      >> "$HERMES/hermes-svc.log"
+    stop "$svc" >> "$HERMES/hermes-svc.log" 2>&1
+    start "$svc" >> "$HERMES/hermes-svc.log" 2>&1
+    echo "$now" > "$HEAL_FLAG-$svc"
+    rm -f "$mem"
+  done
+}
 
 boot() {
   termux-wake-lock
@@ -93,5 +160,8 @@ case "$1" in
   list)       for s in $(all); do [ -n "$(spec "$s")" ] || continue
                 running "$s" && echo "$s running" || echo "$s stopped"; done ;;
   boot)       boot ;;
+  telegram-watch)
+    while :; do heal_step; sleep "$HEAL_INTERVAL"; done ;;
+  telegram-heal) heal_step ;;
   *)          sed -n '2,12p' "$0"; exit 2 ;;
 esac

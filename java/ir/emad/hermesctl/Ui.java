@@ -140,10 +140,14 @@ public final class Ui {
         return t;
     }
 
-    /** Latin/technical text (model ids, keys, logs) laid out left-to-right. */
+    /** Latin/technical text (model ids, keys, logs) laid out left-to-right in its own box. */
     public static TextView ltr(Context ctx, CharSequence value, float sp, int color, boolean bold) {
         TextView t = text(ctx, value, sp, color, bold);
         t.setTextDirection(View.TEXT_DIRECTION_LTR);
+        // Pinning the edge keeps RTL paragraphs ("… · خط ۲ · KB") in logical order;
+        // without this the first-strong heuristic reorders mixed Persian/Latin lines.
+        // LTR-forced text belongs on the left even inside an RTL container.
+        t.setTextAlignment(View.TEXT_ALIGNMENT_TEXT_START);
         return t;
     }
 

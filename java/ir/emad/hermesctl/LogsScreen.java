@@ -4,6 +4,7 @@ import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.Switch;
+import android.widget.TextView;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -89,17 +90,42 @@ final class LogsScreen extends Screen {
 
         LinearLayout card = Ui.card(a);
         card.setBackground(Ui.outline(a, 0xFF0E131D, Ui.STROKE, 18));
+        // Lines are whole; the 11sp type means ~55 characters fit, so show the tail of each
+        // line (the interesting part of a traceback is on the right) and let taps open a line.
         StringBuilder sb = new StringBuilder();
         JSONArray rows = J.arr(log, "lines");
+        final java.util.List<String> raw = new java.util.ArrayList<>();
         for (int i = 0; i < rows.length(); i++) {
-            sb.append(rows.optString(i)).append('\n');
+            raw.add(rows.optString(i));
+            String line = rows.optString(i);
+            sb.append(line.length() > 56 ? "…" + line.substring(line.length() - 55) : line)
+              .append('\n');
         }
-        card.addView(Ui.mono(a, sb.length() == 0 ? "(خالی)" : sb.toString().trim(), 9f, Ui.DIM));
+        TextView code = Ui.mono(a, sb.length() == 0 ? "(خالی)" : sb.toString().trim(), 11f, Ui.DIM);
+        card.addView(code);
         add(card);
-        add(Ui.text(a, file + " · " + J.i(log, "matched", 0) + " خط · " + Ui.size(J.l(log, "size", 0)),
+        // file name on the left, counts on the right, each in its own view so RTL bidi
+        // cannot fold "196 KB" into the Persian word next to it. The count string starts
+        // with a Latin digit so the LTR direction holds.
+        LinearLayout foot = Ui.row(a);
+        foot.addView(Ui.oneLine(Ui.ltr(a, file, 11f, Ui.FAINT, false)), Ui.weight(1f));
+        foot.addView(Ui.ltr(a, J.i(log, "matched", 0) + " lines · " + Ui.size(J.l(log, "size", 0)),
                 11f, Ui.FAINT, false));
+        add(foot);
+        LinearLayout jump = Ui.row(a);
+        jump.setPadding(0, Ui.dp(a, 6), 0, 0);
+        jump.addView(Ui.tonal(a, "آخر خطوط", Ui.ACCENT, v -> scrollToEnd()),
+                Ui.margins(Ui.wrap(), a, 0, 0, 8, 0));
+        jump.addView(Ui.tonal(a, "اول خطوط", Ui.ACCENT, v -> root.post(() -> root.fullScroll(android.view.View.FOCUS_UP))),
+                Ui.wrap());
+        add(jump);
         if (follow) {
-            root.post(() -> root.fullScroll(android.view.View.FOCUS_DOWN));
+            scrollToEnd();
         }
+    }
+
+    /** Show the newest lines: scroll the tab itself, where the tall log card lives. */
+    private void scrollToEnd() {
+        root.post(() -> root.fullScroll(android.view.View.FOCUS_DOWN));
     }
 }
