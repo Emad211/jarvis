@@ -665,6 +665,221 @@ final class Panels {
         Sheet.show(a, "حالت ابزار", box);
     }
 
+    // -------------------------------------------------------------------- research --
+    /**
+     * Ask one question, watch the agent plan, search and read, then get a report that cites a
+     * URL for every claim. Polling (not SSE) on purpose: a research run lives 20–70 s and the
+     * sheet has to survive the app being backgrounded.
+     */
+    static void research(Activity a) {
+        LinearLayout box = Ui.col(a);
+        box.setPadding(Ui.dp(a, 18), Ui.dp(a, 4), Ui.dp(a, 18), Ui.dp(a, 12));
+        final EditText q = Ui.input(a, "سؤالت را بنویس…");
+        q.setSingleLine(false);
+        q.setMinLines(3);
+        q.setGravity(Gravity.TOP | Gravity.END);
+        box.addView(Sheet.section(a, "پژوهش"), Ui.fill());
+        box.addView(q, Ui.fill());
+        for (int depth = 1; depth <= 3; depth++) {
+            final int d = depth;
+            String sub = depth == 1 ? "کوتاه — چند جستجو"
+                    : depth == 2 ? "معمولی — ۵ جستجو و تا ۳ منبع (پیش‌فرض)"
+                    : "عمیق — زیرعامل‌ها هم کمک می‌کنند";
+            box.addView(Sheet.item(a, "عمق " + depth, sub, depth == 2 ? Ui.ACCENT : null,
+                    () -> startResearch(a, q.getText().toString().trim(), d)), Ui.fill());
+            box.addView(Sheet.divider(a), Ui.fill());
+        }
+        Sheet.show(a, "پژوهش", box);
+    }
+
+    private static void startResearch(Activity a, String question, int depth) {
+        if (question.isEmpty()) {
+            toast(a, "سؤال خالی است");
+            return;
+        }
+        AlertDialog spin = busy(a, "شروع…");
+        Api.post("/research", Api.body("question", question, "depth", depth), 30000, res -> {
+            spin.dismiss();
+            String id = res.optString("id", "");
+            if (id.isEmpty()) {
+                toast(a, "شروع نشد: " + res.optString("error", "?"));
+                return;
+            }
+            pollResearch(a, id, question, 0);
+        }, msg -> {
+            spin.dismiss();
+            toast(a, "نشد: " + msg);
+        });
+    }
+
+    private static void pollResearch(Activity a, String id, String question, int tick) {
+        Api.get("/research/" + id, 20000, d -> {
+            String state = d.optString("state", "");
+            boolean done = "done".equals(state) || "failed".equals(state)
+                    || "cancelled".equals(state);
+            if (!done && tick < 120) {
+                renderResearch(a, d, question, true);
+                a.getWindow().getDecorView().postDelayed(
+                        () -> pollResearch(a, id, question, tick + 1), 1500);
+                return;
+            }
+            renderResearch(a, d, question, false);
+        }, msg -> toast(a, "وضعیت نیامد: " + msg));
+    }
+
+    private static void renderResearch(Activity a, JSONObject d, String question, boolean live) {
+        LinearLayout box = Ui.col(a);
+        String state = d.optString("state", "");
+        String ms = d.optLong("ms", 0) > 0 ? (d.optLong("ms", 0) / 1000) + " ثانیه" : "";
+        box.addView(Sheet.section(a, live ? "در حال کار… (" + state + ")"
+                : "پایان (" + state + (ms.isEmpty() ? "" : " · " + ms) + ")"), Ui.fill());
+        box.addView(Ui.text(a, question, 12.5f, Ui.DIM, false), Ui.fill());
+
+        JSONArray steps = d.optJSONArray("steps");
+        for (int i = 0; steps != null && i < steps.length(); i++) {
+            JSONObject s = steps.optJSONObject(i);
+            if (s == null) {
+                continue;
+            }
+            String st = s.optString("state", "");
+            int color = "ok".equals(st) ? Ui.GREEN : "cancelled".equals(st) ? Ui.FAINT
+                    : "failed".equals(st) ? Ui.RED : Ui.ACCENT;
+            long stepMs = s.optLong("ms", 0);
+            String detail = s.optString("detail", "");
+            box.addView(Sheet.item(a, s.optString("title", s.optString("kind", "")),
+                    (stepMs > 0 ? stepMs + "ms" : st)
+                            + (detail.isEmpty() ? "" : " · " + detail), color, null), Ui.fill());
+        }
+
+        String report = d.optString("report", "");
+        if (!report.isEmpty()) {
+            android.widget.TextView body = Ui.text(a, "", 14f, Ui.TEXT, false);
+            body.setText(Md.render(report, Ui.ACCENT, Ui.alpha(Ui.ACCENT, 22)));
+            body.setTextIsSelectable(true);
+            body.setPadding(0, Ui.dp(a, 12), 0, Ui.dp(a, 8));
+            box.addView(body, Ui.fill());
+        }
+
+        JSONArray sources = d.optJSONArray("sources");
+        if (sources != null && sources.length() > 0) {
+            box.addView(Sheet.section(a, "منابع  " + sources.length()), Ui.fill());
+            for (int i = 0; i < sources.length(); i++) {
+                JSONObject s = sources.optJSONObject(i);
+                if (s == null) {
+                    continue;
+                }
+                final String url = s.optString("url", "");
+                box.addView(Sheet.item(a, s.optString("title", url),
+                        "[" + s.optInt("n", i + 1) + "] " + url, null,
+                        () -> open(a, url)), Ui.fill());
+            }
+        }
+        Sheet.show(a, "پژوهش", box);
+    }
+
+    private static void open(Activity a, String url) {
+        try {
+            a.startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse(url)));
+        } catch (Exception e) {
+            toast(a, "مرورگر باز نشد");
+        }
+    }
+
+    // ------------------------------------------------------------------------ bots --
+    /** Bots are Hermes profiles: separate memory, skills, cron and SOUL per assistant. */
+    static void bots(Activity a, String sessionId, String current, Done after) {
+        AlertDialog spin = busy(a, "بات‌ها…");
+        Api.getArray("/bots", 30000, rows -> {
+            spin.dismiss();
+            LinearLayout box = Ui.col(a);
+            box.addView(Sheet.item(a, "بات تازه", "نام و مدلش را بده", null,
+                    () -> newBot(a, after)), Ui.fill());
+            box.addView(Sheet.divider(a), Ui.fill());
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject b = rows.optJSONObject(i);
+                if (b == null) {
+                    continue;
+                }
+                final String id = b.optString("id", "");
+                boolean active = id.equals(current) || (current.isEmpty() && b.optBoolean("default"));
+                String model = b.optString("model", "");
+                StringBuilder sub = new StringBuilder();
+                sub.append(model.isEmpty() ? "مدل پیش‌فرض" : model);
+                if (b.optBoolean("isolated", false)) {
+                    sub.append(" · حافظهٔ مستقل");
+                }
+                if (b.optInt("sessions", 0) > 0) {
+                    sub.append(" · ").append(b.optInt("sessions", 0)).append(" گفتگو");
+                }
+                if (active) {
+                    sub.append(" · فعال");
+                }
+                box.addView(Sheet.item(a, b.optString("emoji", "") + "  " + b.optString("label", id),
+                        sub.toString(), active ? Ui.ACCENT : null,
+                        () -> {
+                            if (sessionId == null || sessionId.isEmpty()) {
+                                toast(a, "اول یک گفتگو بساز");
+                                return;
+                            }
+                            Api.post("/session/" + sessionId + "/bot", Api.body("id", id), 60000,
+                                    res -> {
+                                        toast(a, res.optBoolean("ok", false)
+                                                ? "بات: " + b.optString("label", id) : "نشد");
+                                        if (after != null) {
+                                            after.on();
+                                        }
+                                    }, msg -> toast(a, "نشد: " + msg));
+                        }), Ui.fill());
+                box.addView(Sheet.divider(a), Ui.fill());
+            }
+            Sheet.show(a, "بات‌ها", box);
+        }, msg -> {
+            spin.dismiss();
+            toast(a, "نیامد: " + msg);
+        });
+    }
+
+    private static void newBot(Activity a, Done after) {
+        LinearLayout box = Ui.col(a);
+        box.setPadding(Ui.dp(a, 18), Ui.dp(a, 4), Ui.dp(a, 18), Ui.dp(a, 12));
+        final EditText label = Ui.input(a, "نام بات (مثلاً برنامه‌نویس)");
+        final EditText model = Ui.input(a, "مدل (خالی = پیش‌فرض)");
+        model.setTextDirection(View.TEXT_DIRECTION_LTR);
+        box.addView(Sheet.section(a, "نام"), Ui.fill());
+        box.addView(label, Ui.fill());
+        box.addView(Sheet.section(a, "مدل"), Ui.fill());
+        box.addView(model, Ui.fill());
+        box.addView(Sheet.item(a, "ساختن", "پروفایل جدا از مالک کپی می‌شود", Ui.GREEN, () -> {
+            String name = label.getText().toString().trim();
+            if (name.isEmpty()) {
+                toast(a, "نام لازم است");
+                return;
+            }
+            JSONObject body = Api.body("label", name);
+            String m = model.getText().toString().trim();
+            if (!m.isEmpty()) {
+                try {
+                    body.put("model", m);
+                } catch (Exception ignored) {
+                    // key is a constant string
+                }
+            }
+            AlertDialog spin = busy(a, "ساخت بات… (چند ثانیه)");
+            Api.post("/bots", body, 120000, res -> {
+                spin.dismiss();
+                toast(a, res.optBoolean("ok", false) ? "ساخته شد: " + res.optString("id", "") : "نشد");
+                if (after != null) {
+                    after.on();
+                }
+            }, msg -> {
+                spin.dismiss();
+                toast(a, "نشد: " + msg);
+            });
+        }), Ui.fill());
+        Sheet.show(a, "بات تازه", box);
+    }
+
     // --------------------------------------------------------------------- helpers --
     /** Our own loading panel: a dark rounded card with one line, not the system spinner box. */
     private static AlertDialog busy(Activity a, String text) {

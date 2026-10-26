@@ -693,6 +693,8 @@ public class MainActivity extends Activity {
                 "گفتگوهای قبلی",
                 "شخصیت‌ها",
                 "چه یاد گرفت",
+                "پژوهش",
+                "بات‌ها",
                 "ابزارها و مهارت‌ها",
                 "حالت ابزار این گفتگو",
                 "زمان‌بندی",
@@ -721,30 +723,36 @@ public class MainActivity extends Activity {
                             Panels.learned(this);
                             break;
                         case 4:
-                            Panels.tools(this);
+                            Panels.research(this);
                             break;
                         case 5:
-                            Panels.toolsets(this, sessionId, toolsetPreset, () -> { });
+                            Panels.bots(this, sessionId, "", () -> openSession(sessionId));
                             break;
                         case 6:
-                            Panels.cron(this);
+                            Panels.tools(this);
                             break;
                         case 7:
-                            Panels.services(this);
+                            Panels.toolsets(this, sessionId, toolsetPreset, () -> { });
                             break;
                         case 8:
-                            providersDialog();
+                            Panels.cron(this);
                             break;
                         case 9:
-                            settings();
+                            Panels.services(this);
                             break;
                         case 10:
-                            setupWizard();
+                            providersDialog();
                             break;
                         case 11:
-                            Panels.voice(this);
+                            settings();
                             break;
                         case 12:
+                            setupWizard();
+                            break;
+                        case 13:
+                            Panels.voice(this);
+                            break;
+                        case 14:
                             ttsOn = !ttsOn;
                             prefs.edit().putBoolean("tts", ttsOn).apply();
                             toast(ttsOn ? "صدا روشن شد" : "صدا خاموش شد");
