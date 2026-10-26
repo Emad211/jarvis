@@ -314,6 +314,14 @@ def build_agent(session: Session, model: str, toolsets: List[str], reasoning: st
     def on_status(kind, message=""):
         session.emit("status", {"kind": str(kind), "text": _short(message, 300)})
 
+    # Hermes emits background lifecycle events here — sub-agent progress and completion above
+    # all. Without this hook a delegated task is launched and its answer is thrown away, which
+    # is exactly what "waiting for them" followed by silence used to be.
+    def on_event(kind, data=None):
+        name = str(kind)
+        print("jarvisd: event %s" % name, flush=True)
+        session.emit("agent.event", {"kind": name, "data": _short(data, 900)})
+
     def on_clarify(question, choices=None):
         return ask(session, "clarify", {"question": _short(question, 1200),
                                         "choices": _short(choices, 400)}, timeout=300)
@@ -346,6 +354,7 @@ def build_agent(session: Session, model: str, toolsets: List[str], reasoning: st
         tool_complete_callback=on_tool_done,
         tool_progress_callback=on_progress,
         status_callback=on_status,
+        event_callback=on_event,
         clarify_callback=on_clarify,
     )
     return agent, on_approval
@@ -540,7 +549,8 @@ def _set_persona(sid: str, pid: str) -> bool:
     s.agent = None
     s.save()
     return True
-for _mod_name in ("jarvisd_personas", "jarvisd_tools", "jarvisd_ops", "jarvisd_voice"):
+for _mod_name in ("jarvisd_personas", "jarvisd_tools", "jarvisd_ops", "jarvisd_voice",
+                  "jarvisd_research"):
     try:
         _mod = __import__(_mod_name)
         _mod.register(app, CTX)

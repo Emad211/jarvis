@@ -291,7 +291,7 @@ fi
 
 # ------------------------------------------------------------------ 4. ~/.local/bin --
 # The daemon and its helpers ship next to this script in the repo (phone/.local/bin).
-REQUIRED="jarvisd.py gwctl.py hermes-svc jarvis_fast.py phone-env"
+REQUIRED="jarvisd.py gwctl.py hermes-svc jarvis_fast.py jarvis-doctor phone-env"
 if [ -f "$SELF_DIR/jarvis-fast" ]; then REQUIRED="$REQUIRED jarvis-fast"; fi
 OPTIONAL="phone-open phone-tap phone-swipe phone-key phone-type phone-screenshot phone-ui phone-see phone-contacts saat gspeed google-probe probe_jarvis.py probe_api.py probe_api.sh gwctl-start.sh"
 
@@ -567,6 +567,22 @@ BOOT
   fi
 fi
 
+# --------------------------------------------------------------- doctor: last word --
+# A shell cannot install an Android app, accept an adb pairing dialog or flip the battery
+# toggle. jarvis-doctor names those, one line each, with the exact action — and a fresh
+# phone is *expected* to leave two or three behind, so its exit code is ignored on purpose:
+# a first install must explain, not fail.
+step "بررسی پایانی (jarvis-doctor)"
+if [ "$DRY" -eq 1 ]; then
+  printf '  [dry-run] sh %s/jarvis-doctor\n' "$BIN_DIR"
+elif [ -x "$BIN_DIR/jarvis-doctor" ]; then
+  say ""
+  sh "$BIN_DIR/jarvis-doctor" || :
+  say ""
+else
+  warn "jarvis-doctor نصب نشد؛ بعداً دستی: sh ~/.local/bin/jarvis-doctor"
+fi
+
 # ------------------------------------------------------------------ what next --
 say ""
 say "── کارهای بعدی ──"
@@ -575,7 +591,7 @@ say "۲) آدرس دیمن: http://127.0.0.1:$PORT  (اگر خواست)"
 say "۳) در ویزارد اول‌بار فقط دو چیز لازم است: ارائه‌دهنده + کلید API."
 say "   پیش‌فرض River AI است؛ بدون کلید هم اپ باز می‌شود ولی مدل جواب نمی‌دهد."
 say "۴) بعد از کلید، «تست» را بزن؛ بعد پیام اول را بفرست."
-say "۵) شروع خودکار پس از ریبوت: اپ Termux:Boot را یک‌بار باز کن."
+say "۵) هر وقت خواستی بدانی چه چیزی مانده: sh ~/.local/bin/jarvis-doctor"
 say ""
 say "راهنما: docs/install.md · راهنمای کاربر: docs/product.md"
 

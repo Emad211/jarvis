@@ -1,0 +1,382 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# ============================================================================
+# jarvis-doctor — tells a stranger, in Persian, what is ready and what is left.
+#
+#   sh ~/.local/bin/jarvis-doctor          # full report, one line per check
+#   sh ~/.local/bin/jarvis-doctor --fix    # also do the safe repairs
+#   sh ~/.local/bin/jarvis-doctor --quiet  # only problems + the final line
+#
+# Why this exists: a shell script can install packages, clone Hermes and start tmux
+# services, but it cannot install an Android app, cannot toggle Developer options and
+# cannot accept an adb pairing dialog. Those three steps are the wall a stranger hits,
+# so the doctor names them, in order, with the exact next action — and never pretends
+# a failed check passed.
+#
+# Checks, in order (each prints ✓ / ! / ✗ and, when not ✓, the exact action):
+#   1. Termux itself        $PREFIX, pkg working, Android version + arch
+#   2. Termux:Boot app      ~/.termux/boot exists → autostart after reboot
+#   3. Termux:API app       termux-battery-status answers → battery/toast/clipboard
+#   4. device control       adb on 127.0.0.1:5555, else rish (Shizuku), else neither
+#   5. runtime              a provider key, jarvisd answering, cron unit running
+#   6. battery              Termux exempt from Doze (manual toggle)
+#
+# Exit codes: 0 = nothing manual left · 1 = manual work remains · 2 = hard failure
+#             (not Termux, or pkg unusable). Callers should treat 1 as information:
+#             a fresh phone is expected to leave three or four items behind.
+#
+# Invariants: POSIX sh, `set -u`, everything quoted, LF endings, no secret ever printed
+# (keys are only ever tested for presence, never read into a variable that is echoed).
+# ============================================================================
+set -u
+
+FIX=0
+QUIET=0
+MANUAL=""
+NMANUAL=0
+
+say() { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
+good() { [ "$QUIET" -eq 1 ] || printf '✓ %s\n' "$*"; }
+bad() { printf '✗ %s\n' "$*"; }
+todo() { printf '! %s\n' "$*"; }
+act() { printf '  → %s\n' "$*"; }
+did() { [ "$QUIET" -eq 1 ] || printf '  + %s\n' "$*"; }
+
+# Register one remaining manual step (shown in the final line).
+manual() {
+  if [ -z "$MANUAL" ]; then
+    MANUAL="$1"
+  else
+    MANUAL="$MANUAL، $1"
+  fi
+  NMANUAL=$((NMANUAL + 1))
+}
+
+usage() {
+  cat <<'USAGE'
+جارویس — بررسی وضعیت نصب (doctor)
+
+  sh jarvis-doctor           بررسی کامل: چه چیزی آماده است و چه چیزی مانده
+  sh jarvis-doctor --fix     همان بررسی + تعمیرهای بی‌خطر (بستهٔ termux-api،
+                             اجرای سرویس‌های خوابیده، تلاش برای adb connect)
+  sh jarvis-doctor --quiet   فقط کارهای مانده و خط آخر
+  sh jarvis-doctor -h        همین راهنما
+
+  چیزهایی که این اسکریپت نمی‌تواند انجام دهد (و باید خودت بزنی):
+  نصب اپ‌های F‑Droid (Termux:Boot / Termux:API / Shizuku)، تأیید جفت‌سازی adb،
+  و خارج‌کردن Termux از بهینه‌سازی باتری. برای هر کدام، دستور یا مسیر دقیق چاپ می‌شود.
+
+  کد خروج: 0 همه‌چیز آماده · 1 چند کار دستی مانده · 2 مشکل پایه (Termux نیست)
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --fix) FIX=1 ;;
+    --quiet) QUIET=1 ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      bad "گزینهٔ ناشناخته: $1"
+      usage
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+: "${HOME:?HOME is not set — run this inside Termux}"
+PREFIX_DIR=${PREFIX:-}
+BIN_DIR="$HOME/.local/bin"
+ENV_FILE="$HOME/.hermes/.env"
+SVC="$BIN_DIR/hermes-svc"
+ADB_ADDR="127.0.0.1:5555"
+
+# Helpers ---------------------------------------------------------------------------
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# Is a Termux package installed? (dpkg is the package manager behind pkg.)
+pkg_installed() { dpkg -s "$1" >/dev/null 2>&1; }
+
+# HTTP GET; empty output + non-zero when nothing can answer. curl first, python3 second.
+http_get() {
+  if have curl; then
+    curl -s --max-time 4 "$1" 2>/dev/null
+    return $?
+  fi
+  if have python3; then
+    python3 -c 'import sys,urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=4).read().decode())' "$1" 2>/dev/null
+    return $?
+  fi
+  return 1
+}
+
+# A Termux:API command answers only when the companion APK is installed too.
+api_answers() { timeout 8 "$1" >/dev/null 2>&1; }
+
+say "── بررسی جارویس ──"
+say ""
+
+# --------------------------------------------------------------- 1. Termux itself --
+case "$PREFIX_DIR" in
+  *com.termux*) TERMUX_OK=1 ;;
+  *) TERMUX_OK=0 ;;
+esac
+
+ANDROID_VER=$(getprop ro.build.version.release 2>/dev/null || :)
+ANDROID_SDK=$(getprop ro.build.version.sdk 2>/dev/null || :)
+ABI=$(getprop ro.product.cpu.abi 2>/dev/null || :)
+[ -n "$ABI" ] || ABI=$(uname -m 2>/dev/null || :)
+
+if [ "$TERMUX_OK" -eq 1 ] && [ -d "$PREFIX_DIR/bin" ]; then
+  if [ -n "$ANDROID_VER" ]; then
+    good "Termux: Android $ANDROID_VER (API $ANDROID_SDK، $ABI) — مسیر درست است"
+  else
+    good "Termux: $PREFIX_DIR — مسیر درست است"
+  fi
+else
+  bad "این محیط Termux نیست (PREFIX='${PREFIX_DIR}')"
+  act "این فایل را داخل Termux اجرا کن. اگر Termux نداری:"
+  act "https://f-droid.org/packages/com.termux/  (نسخهٔ F‑Droid، نه Play Store)"
+  printf '\n✗ این دو کار مانده: نصب Termux از F‑Droid، و اجرای همین اسکریپت داخل آن\n'
+  exit 2
+fi
+
+if have pkg && have dpkg; then
+  good "pkg سالم است"
+else
+  bad "pkg/dpkg پیدا نشد — نصب بسته‌ها کار نمی‌کند"
+  act "pkg install -y coreutils   (یا Termux را از F‑Droid دوباره نصب کن)"
+  manual "نصب بسته‌ها (pkg)"
+fi
+
+# ------------------------------------------------------------ 2. Termux:Boot (app) --
+BOOT_DIR="$HOME/.termux/boot"
+if [ -d "$BOOT_DIR" ] && [ -w "$BOOT_DIR" ]; then
+  NHOOKS=$(ls -1 "$BOOT_DIR" 2>/dev/null | wc -l | tr -d ' ')
+  good "Termux:Boot: پوشهٔ $BOOT_DIR هست ($NHOOKS اسکریپت) — شروع خودکار بعد از ریبوت"
+else
+  if have pm && pm list packages 2>/dev/null | grep -q 'package:com.termux.boot'; then
+    todo "Termux:Boot نصب است ولی پوشهٔ ~/.termux/boot ساخته نشده"
+    act "اپ Termux:Boot را یک‌بار باز کن (همان‌جا پوشه ساخته می‌شود)، بعد: sh ~/.local/bin/jarvis-install"
+  else
+    todo "Termux:Boot نصب نیست — بدون آن، بعد از هر ریبوت باید دستی سرویس را بالا بیاوری"
+    act "https://f-droid.org/packages/com.termux.boot/  → نصب، بعد یک‌بار بازش کن"
+    act "بعد: sh ~/.local/bin/jarvis-install    (هوک بوت نوشته می‌شود)"
+  fi
+  manual "Termux:Boot"
+fi
+
+# ------------------------------------------------------------- 3. Termux:API (app) --
+if have termux-battery-status && api_answers termux-battery-status; then
+  good "Termux:API جواب می‌دهد (باتری/کلیپ‌بورد/اعلان فعال است)"
+else
+  if pkg_installed termux-api; then
+    todo "بستهٔ termux-api نصب است ولی دستورهای آن جواب نمی‌دهند — اپ Termux:API نیست"
+  else
+    todo "Termux:API نصب نیست (باتری، کلیپ‌بورد، اعلان و توست کار نمی‌کنند)"
+    if [ "$FIX" -eq 1 ]; then
+      if pkg install -y termux-api >/dev/null 2>&1; then
+        did "بستهٔ termux-api نصب شد"
+      else
+        bad "نصب بستهٔ termux-api نشد (شبکه؟)"
+      fi
+    fi
+  fi
+  act "https://f-droid.org/packages/com.termux.api/  → نصب، بعد یک‌بار بازش کن"
+  act "بعد: pkg install -y termux-api"
+  manual "Termux:API"
+fi
+
+# ------------------------------------------------------------- 4. device control --
+# Two independent routes give the agent hands on the phone. Everything else in Jarvis
+# (chat, voice, tools that only touch files) works without either.
+ADB_OK=0
+if have adb; then
+  if timeout 8 adb -s "$ADB_ADDR" shell true >/dev/null 2>&1; then
+    ADB_OK=1
+    good "کنترل گوشی با adb: $ADB_ADDR وصل است (سریع‌ترین راه، ~۹۲ms در هر اکشن)"
+  fi
+else
+  todo "adb نصب نیست"
+  act "pkg install -y android-tools"
+fi
+
+RISH_OK=0
+if have rish; then
+  if timeout 25 rish -c 'echo ok' >/dev/null 2>&1; then
+    RISH_OK=1
+  fi
+fi
+
+if [ "$ADB_OK" -eq 0 ]; then
+  # Sometimes adb answers, but on the random port Android picked for wireless debugging.
+  OTHER=""
+  if have adb; then
+    OTHER=$(adb devices 2>/dev/null | awk '/^127\.0\.0\.1:/{print $1; exit}')
+  fi
+  if [ -n "$OTHER" ] && [ "$OTHER" != "$ADB_ADDR" ]; then
+    todo "adb وصل است ولی روی $OTHER — مسیر سریع جارویس آدرس $ADB_ADDR را می‌خواهد"
+    act "اگر Shizuku داری: rish -c \"setprop service.adb.tcp.port 5555; stop adbd; start adbd\""
+    act "بعد: adb connect $ADB_ADDR"
+  else
+    todo "کنترل گوشی با adb: $ADB_ADDR وصل نیست"
+    act "یک‌بار در گوشی: Settings → About phone → روی «Build number» هفت بار بزن"
+    act "Settings → Developer options → Wireless debugging → روشن"
+    act "در همان صفحه: «Pair device with pairing code» → آدرس و کد ۶ رقمی را بردار:"
+    act "  adb pair <IP:PORT> <کد>"
+    act "بعد در صفحهٔ Wireless debugging آدرس دیگری نشان داده می‌شود:"
+    act "  adb connect <IP:PORT>"
+    act "این کار فقط یک‌بار لازم است (بعد از هر ریبوت ممکن است تکرار شود)."
+    if [ "$FIX" -eq 1 ]; then
+      timeout 10 adb connect "$ADB_ADDR" >/dev/null 2>&1 || :
+      if timeout 8 adb -s "$ADB_ADDR" shell true >/dev/null 2>&1; then
+        ADB_OK=1
+        did "adb وصل شد: $ADB_ADDR"
+      fi
+    fi
+  fi
+fi
+
+if [ "$RISH_OK" -eq 1 ]; then
+  if [ "$ADB_OK" -eq 1 ]; then
+    good "Shizuku (rish) هم جواب می‌دهد — مسیر پشتیبان آماده است"
+  else
+    good "Shizuku (rish) جواب می‌دهد — کنترل گوشی کار می‌کند (هر اکشن ~۳ ثانیه، نه ۹۲ms)"
+  fi
+else
+  if have rish; then
+    todo "Shizuku نصب است ولی rish جواب نمی‌دهد (سرویس Shizuku خاموش است؟)"
+    act "اپ Shizuku را باز کن و Start بزن"
+  else
+    todo "Shizuku نصب نیست (مسیر پشتیبان کنترل گوشی)"
+    act "https://f-droid.org/packages/moe.shizuku.privileged.api/  → نصب، بعد Start"
+  fi
+fi
+
+if [ "$ADB_OK" -eq 0 ] && [ "$RISH_OK" -eq 0 ]; then
+  act "بدون هیچ‌کدام: چت، صدا، فایل‌ها و cron کار می‌کنند؛ ولی «اپ را باز کن / تپ کن /"
+  act "اسکرین‌شات بگیر» از این گوشی انجام نمی‌شود."
+  manual "کنترل گوشی (adb یا Shizuku)"
+fi
+
+# ---------------------------------------------------------------- 5. the runtime --
+KEY_OK=0
+STATE=$(http_get "http://127.0.0.1:8780/setup/state" 2>/dev/null || :)
+case "$STATE" in
+  *'"needs_setup":false'*) KEY_OK=1 ;;
+  *'"has_key":true'*) KEY_OK=1 ;;
+esac
+if [ "$KEY_OK" -eq 1 ]; then
+  good "کلید API ذخیره شده است (در اپ: تنظیمات → ارائه‌دهنده، یا ویزارد اول‌بار)"
+elif [ -n "$STATE" ]; then
+  todo "کلید API ذخیره نشده — مدل بدون کلید جواب نمی‌دهد"
+  act "اپ جارویس را باز کن → ویزارد اول‌بار: ارائه‌دهنده (پیش‌فرض River AI) → کلید → «تست»"
+  manual "کلید API"
+else
+  # jarvisd is not answering; fall back to the env file, names only, never values.
+  if [ -f "$ENV_FILE" ] && grep -qE '^(RIVER_API_KEY|GEMINI_API_KEY|GOOGLE_AI_STUDIO_API_KEY|OPENROUTER_API_KEY|AVALAI_API_KEY)=.' "$ENV_FILE" 2>/dev/null; then
+    good "کلید API در ~/.hermes/.env هست (دیمن فعلاً جواب نمی‌دهد)"
+    KEY_OK=1
+  else
+    todo "کلیدی پیدا نشد (نه در دیمن، نه در ~/.hermes/.env)"
+    act "اپ جارویس → ویزارد اول‌بار → ارائه‌دهنده + کلید"
+    manual "کلید API"
+  fi
+fi
+
+PORT=$(printf '%s' "$STATE" | sed -n 's/.*"port":\([0-9][0-9]*\).*/\1/p' | head -1)
+case "$PORT" in '' | *[!0-9]*) PORT=8780 ;; esac
+HEALTH=$(http_get "http://127.0.0.1:$PORT/health" 2>/dev/null || :)
+case "$HEALTH" in
+  *'"ok":true'*)
+    case "$HEALTH" in
+      *'"warm":true'*) good "دیمن جواب می‌دهد ($PORT) و گرم است" ;;
+      *) good "دیمن جواب می‌دهد ($PORT) — دارد گرم می‌شود" ;;
+    esac
+    ;;
+  *)
+    todo "دیمن جواب نمی‌دهد (http://127.0.0.1:$PORT/health)"
+    if [ "$FIX" -eq 1 ] && [ -f "$SVC" ]; then
+      if sh "$SVC" start jarvis >/dev/null 2>&1; then
+        did "jarvis اجرا شد"
+      else
+        bad "اجرای jarvis نشد — لاگ: ~/.hermes/jarvis.log"
+      fi
+    else
+      act "sh ~/.local/bin/hermes-svc start jarvis"
+      act "اگر باز هم نه: tail -n 30 ~/.hermes/jarvis.log"
+    fi
+    manual "دیمن jarvis"
+    ;;
+esac
+
+# cron is its own unit: it used to be ticked by the messaging gateway that no longer exists.
+if [ -f "$SVC" ] && sh "$SVC" list 2>/dev/null | grep -q '^cron '; then
+  if sh "$SVC" status cron >/dev/null 2>&1; then
+    good "cron در حال اجراست (کارهای زمان‌بندی‌شده)"
+  else
+    todo "cron خاموش است — کارهای زمان‌بندی‌شده اجرا نمی‌شوند"
+    if [ "$FIX" -eq 1 ] && sh "$SVC" start cron >/dev/null 2>&1; then
+      did "cron اجرا شد"
+    else
+      act "sh ~/.local/bin/hermes-svc start cron"
+      manual "cron"
+    fi
+  fi
+else
+  say "- cron: این نسخهٔ hermes-svc واحد cron ندارد (نادیده گرفته شد)"
+fi
+
+# ------------------------------------------------------------------- 6. battery --
+# Doze whitelist is not readable by an ordinary app: rish (Shizuku) or adb can answer it.
+BATT=unknown
+if [ "$RISH_OK" -eq 1 ]; then
+  WL=$(timeout 25 rish -c 'dumpsys deviceidle whitelist' 2>/dev/null || :)
+elif [ "$ADB_OK" -eq 1 ]; then
+  WL=$(timeout 10 adb -s "$ADB_ADDR" shell dumpsys deviceidle whitelist 2>/dev/null || :)
+else
+  WL=""
+fi
+if [ -n "$WL" ]; then
+  case "$WL" in
+    *com.termux*) BATT=ok ;;
+    *) BATT=missing ;;
+  esac
+fi
+case "$BATT" in
+  ok) good "بهینه‌سازی باتری: Termux مستثنی است (اندروید آن را نمی‌خواباند)" ;;
+  missing)
+    todo "بهینه‌سازی باتری: Termux مستثنی نیست — اندروید ممکن است دیمن را بکشد"
+    act "Settings → Apps → Termux → Battery → Unrestricted"
+    act "(میان‌بر: am start -a android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS)"
+    manual "مستثنی‌کردن باتری"
+    ;;
+  *)
+    todo "بهینه‌سازی باتری: قابل بررسی نبود (نه Shizuku نه adb جواب داد) — خودت چک کن"
+    act "Settings → Apps → Termux → Battery → Unrestricted"
+    manual "مستثنی‌کردن باتری"
+    ;;
+esac
+
+# ---------------------------------------------------------------------- the verdict --
+printf '\n'
+if [ "$NMANUAL" -eq 0 ]; then
+  printf 'آماده است — اپ جارویس را باز کن و پیام اول را بفرست.\n'
+  exit 0
+fi
+
+case "$NMANUAL" in
+  1) N="یک کار" ;;
+  2) N="دو کار" ;;
+  3) N="سه کار" ;;
+  4) N="چهار کار" ;;
+  5) N="پنج کار" ;;
+  *) N="$NMANUAL کار" ;;
+esac
+printf 'این %s مانده: %s\n' "$N" "$MANUAL"
+printf '\n'
+printf 'بعد از انجامشان دوباره همین دستور را بزن: sh ~/.local/bin/jarvis-doctor\n'
+printf 'یا با تعمیر خودکار: sh ~/.local/bin/jarvis-doctor --fix\n'
+exit 1

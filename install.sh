@@ -17,7 +17,8 @@
 #   3. verifies ssh to Termux (port 8022) and adb (port 5555) before touching anything;
 #   4. pushes this repo's phone/ tree into the phone's $HOME (config.yaml is never pushed);
 #   5. runs `jarvis-install` on the phone over ssh (idempotent bootstrap: packages, Hermes
-#      Agent, ~/.local/bin, ~/.hermes, tmux services, boot hook);
+#      Agent, ~/.local/bin, ~/.hermes, tmux services, boot hook) and then `jarvis-doctor`,
+#      which names the few steps no shell can do (F-Droid apps, adb pairing, battery toggle);
 #   6. builds and installs the console APK: `pwsh -File jarvis/build.ps1 -Install`, or plain
 #      `adb install -r` for an already built jarvis/dist/jarvis.apk with --no-build.
 #
@@ -40,7 +41,8 @@ SKIP_APK=0
 NO_BUILD=0
 
 usage() {
-  sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+  # Print the header block (from line 2 up to the closing "# ====" rule), minus the "# ".
+  sed -n '2,/^# =====/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -193,6 +195,15 @@ else
     die "jarvis-install failed on the phone (see the output above).
   Re-run on the phone with more detail:  sh ~/.local/bin/jarvis-install --dry-run
   Log: ~/.hermes/jarvis.log" 3
+fi
+
+# The doctor names what a shell cannot do (F-Droid apps, adb pairing, the battery toggle).
+# Its exit code is information, not failure: a fresh phone always leaves a few items.
+step "5b/6 doctor on the phone (what is still manual)"
+if [ "$DRY" -eq 1 ]; then
+  printf '  [dry-run] bash %s sh ~/.local/bin/jarvis-doctor\n' "$PH"
+else
+  bash "$PH" 'sh "$HOME/.local/bin/jarvis-doctor" || true' || true
 fi
 
 # -------------------------------------------------------------------------- 6. the APK --

@@ -14,3 +14,5 @@ phone/.hermes/auth.json
 phone/.hermes/memories/
 phone/.hermes/custom_endpoints.json
 **/__pycache__/
+
+.scratch/
