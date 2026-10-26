@@ -82,11 +82,12 @@ DEFAULTS: Dict[str, Any] = {
     "stt_or_fallback": False,
     "stt_language": "fa",
     "tts_provider": "gemini",                 # gemini | elevenlabs
-    "tts_model": "gemini-3.8-flash-tts",
-    # Free-tier TTS quota is per model and runs out during the day: 3.8-flash-tts starts
-    # answering 429 while these two still render Persian. Tried in order, first one that
-    # answers wins, so the voice keeps working when the daily quota of the default is gone.
-    "tts_fallback_models": "gemini-2.5-flash-preview-tts,gemini-3.1-flash-tts-preview",
+    "tts_model": "gemini-3.8-flash-lite-tts",
+    # Free-tier TTS quota is per model and runs out during the day, so the chain starts on the
+    # fast lite model and falls back to the preview one. Measured on this phone: the lite model
+    # renders a 7 s Persian sentence in 4.4 s, 3.8-flash-tts took 9.4 s, and 2.5-preview-tts
+    # now answers HTTP 400 ("model tried to generate text") — it is out of the chain.
+    "tts_fallback_models": "gemini-3.1-flash-tts-preview",
     "tts_voice": "Kore",                      # Gemini prebuilt voice
     "tts_fallback_provider": "none",          # set to elevenlabs once its 403 clears
     "el_model": "eleven_v4_turbo",            # the multilingual one that speaks Persian
