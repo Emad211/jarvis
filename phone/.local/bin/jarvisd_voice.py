@@ -61,6 +61,19 @@ import wave
 from typing import Any, Dict, List, Optional, Tuple
 
 GEMINI = "https://generativelanguage.googleapis.com/v1beta"
+
+# Gemini's prebuilt voice set. Names only: the app shows them in a picker, and the same name
+# is what /voice/out expects back.
+GEMINI_VOICES = [
+    {"id": "Kore", "name": "Kore — آرام و گرم", "lang": "multi"},
+    {"id": "Puck", "name": "Puck — پرانرژی", "lang": "multi"},
+    {"id": "Aoede", "name": "Aoede — سبک و روشن", "lang": "multi"},
+    {"id": "Charon", "name": "Charon — مردانه و عمیق", "lang": "multi"},
+    {"id": "Fenrir", "name": "Fenrir — محکم", "lang": "multi"},
+    {"id": "Leda", "name": "Leda — جوان", "lang": "multi"},
+    {"id": "Orus", "name": "Orus — رسمی", "lang": "multi"},
+    {"id": "Zephyr", "name": "Zephyr — نرم", "lang": "multi"},
+]
 OPENROUTER = "https://openrouter.ai/api/v1"
 ELEVEN = "https://api.elevenlabs.io/v1"
 WHISPER_MODEL = "openai/whisper-large-v3"
@@ -195,8 +208,36 @@ def _read_env(name: str) -> str:
     return _read_env_file(name) or os.environ.get(name, "")
 
 
+def _settings_path() -> str:
+    """Where the app keeps its own voice choices (engine, voice, models)."""
+    return os.path.join(_hermes(), "jarvis", "voice_settings.json")
+
+
+def save_settings(values: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge a partial settings dict into the file and return the new effective config."""
+    allowed = {k for k in DEFAULTS}
+    path = _settings_path()
+    current: Dict[str, Any] = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            loaded = json.load(fh)
+        if isinstance(loaded, dict):
+            current = loaded
+    except (OSError, ValueError):
+        current = {}
+    for key, val in (values or {}).items():
+        if key in allowed and val is not None:
+            current[key] = val
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(current, fh, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+    return config(refresh=True)
+
+
 def config(refresh: bool = False) -> Dict[str, Any]:
-    """DEFAULTS <- config.yaml `voice:` <- JARVIS_VOICE_<KEY> env. Cached for 5 s."""
+    """DEFAULTS <- config.yaml `voice:` <- app settings <- JARVIS_VOICE_<KEY> env, cached 5 s."""
     global _CFG_CACHE
     stamp, cached = _CFG_CACHE
     if not refresh and cached and time.time() - stamp < 5.0:
@@ -231,6 +272,17 @@ def config(refresh: bool = False) -> Dict[str, Any]:
     for key, val in raw.items():
         if val not in (None, ""):
             cfg[key] = val
+    # Settings the app wrote win over both the yaml and the defaults: this file belongs to us,
+    # while config.yaml belongs to Hermes and validates its own keys.
+    try:
+        with open(_settings_path(), encoding="utf-8") as fh:
+            saved = json.load(fh)
+        if isinstance(saved, dict):
+            for key, val in saved.items():
+                if val not in (None, ""):
+                    cfg[key] = val
+    except (OSError, ValueError):
+        pass
     for key, default in DEFAULTS.items():
         env = os.environ.get("JARVIS_VOICE_" + key.upper())
         if env in (None, ""):
@@ -857,6 +909,39 @@ async def _tts_gemini(text: str, voice: str, model: str) -> bytes:
     return _audio_from_gemini(resp.json())
 
 
+_VOICES_CACHE: Tuple[float, Any] = (0.0, None)
+
+
+async def _el_voices(ttl: float = 600.0) -> Any:
+    """The account's ElevenLabs voices, Persian ones first. None when the host is unreachable."""
+    global _VOICES_CACHE
+    stamp, cached = _VOICES_CACHE
+    if cached is not None and time.time() - stamp < ttl:
+        return cached
+    key = _el_key()
+    if not key:
+        return []
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(ELEVEN + "/voices", headers={"xi-api-key": key})
+        if r.status_code != 200:
+            return None
+        rows = []
+        for v in (r.json().get("voices") or []):
+            labels = v.get("labels") or {}
+            rows.append({"id": v.get("voice_id", ""), "name": v.get("name", ""),
+                         "lang": labels.get("language", ""),
+                         "accent": labels.get("accent", ""),
+                         "gender": labels.get("gender", "")})
+        rows.sort(key=lambda v: (0 if v["lang"] == "fa" else 1, v["name"]))
+        _VOICES_CACHE = (time.time(), rows)
+        return rows
+    except Exception as exc:  # noqa: BLE001
+        _CTX.get("notify", lambda m: None)("voice: voices failed: %s" % type(exc).__name__)
+        return None
+
+
 async def _tts_eleven(text: str, voice_id: str, model: str) -> bytes:
     key = _el_key()
     if not key:
@@ -999,6 +1084,15 @@ def register(app, ctx) -> None:
         return JSONResponse({"ok": False, "error": code, "detail": redact(detail)},
                             status_code=status_code)
 
+    async def _json_body(req) -> Dict[str, Any]:
+        """Small JSON body reader; returns {} for anything unusable."""
+        try:
+            raw = await req.body()
+            data = json.loads(raw) if raw else {}
+        except Exception:  # noqa: BLE001
+            return {}
+        return data if isinstance(data, dict) else {}
+
     async def body_bytes(req) -> bytes:
         """The app posts the WAV as the whole body; accept JSON {wav|audio|b64|data} too."""
         blob = await req.body()
@@ -1019,6 +1113,46 @@ def register(app, ctx) -> None:
                 except Exception:  # noqa: BLE001
                     return b""
         return b""
+
+    @app.get("/voice/config")
+    def voice_config():
+        """Everything the app needs to render its voice settings screen."""
+        cfg = config(refresh=True)
+        keys = {"gemini": bool(_gem_key()), "elevenlabs": bool(_el_key())}
+        return {"ok": True,
+                "tts_provider": cfg.get("tts_provider"),
+                "tts_model": cfg.get("tts_model"),
+                "tts_voice": cfg.get("tts_voice"),
+                "tts_fallback_models": cfg.get("tts_fallback_models"),
+                "el_model": cfg.get("el_model"),
+                "el_voice_id": cfg.get("el_voice_id"),
+                "stt_model": cfg.get("stt_model"),
+                "stt_chain": [m for m, _ in _stt_chain(cfg)],
+                "has_key": keys}
+
+    @app.post("/voice/config")
+    async def voice_config_set(request: Request):
+        data = await _json_body(request)
+        if not data:
+            return err("empty", "no settings in the body")
+        try:
+            cfg = save_settings(data)
+        except OSError as exc:
+            return err("write_failed", str(exc), 500)
+        return {"ok": True, "tts_provider": cfg.get("tts_provider"),
+                "tts_model": cfg.get("tts_model"), "tts_voice": cfg.get("tts_voice"),
+                "el_model": cfg.get("el_model"), "el_voice_id": cfg.get("el_voice_id")}
+
+    @app.get("/voice/voices")
+    async def voice_list(engine: str = ""):
+        """Voices for one engine. ElevenLabs is asked live; Gemini's are a fixed set."""
+        eng = (engine or str(config().get("tts_provider") or "gemini")).lower()
+        if eng == "elevenlabs":
+            rows = await _el_voices()
+            if rows is None:
+                return err("unreachable", "api.elevenlabs.io did not answer", 502)
+            return {"ok": True, "engine": "elevenlabs", "voices": rows}
+        return {"ok": True, "engine": "gemini", "voices": GEMINI_VOICES}
 
     @app.post("/voice/in")
     async def voice_in(request: Request):

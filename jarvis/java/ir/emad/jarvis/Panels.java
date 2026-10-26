@@ -519,6 +519,115 @@ final class Panels {
         });
     }
 
+    // ----------------------------------------------------------------------- voice --
+    /**
+     * Voice settings with full control: which engine speaks, which voice, which model.
+     * ElevenLabs has the Persian voices (Roya, Hooman, Connery…) and answers in ~2.4 s;
+     * Gemini is free but needs quota. The choice is stored by the daemon, not by the app.
+     */
+    static void voice(Activity a) {
+        AlertDialog spin = busy(a, "تنظیمات صدا…");
+        Api.get("/voice/config", 20000, cfg -> {
+            spin.dismiss();
+            String engine = cfg.optString("tts_provider", "gemini");
+            JSONObject keys = cfg.optJSONObject("has_key");
+            LinearLayout box = Ui.col(a);
+            box.addView(Sheet.section(a, "موتور صدا"), Ui.fill());
+            for (String id : new String[]{"elevenlabs", "gemini"}) {
+                boolean hasKey = keys != null && keys.optBoolean(id, false);
+                boolean on = id.equals(engine);
+                String label = "elevenlabs".equals(id)
+                        ? "ElevenLabs — صداهای فارسی" : "Gemini — رایگان با سهمیه";
+                String sub = on ? "فعال" : (hasKey ? "کلید دارد" : "بدون کلید");
+                box.addView(Sheet.item(a, label, sub, on ? Ui.ACCENT
+                        : (hasKey ? Ui.GREEN : null),
+                        () -> setVoice(a, Api.body("tts_provider", id), "موتور صدا")), Ui.fill());
+                box.addView(Sheet.divider(a), Ui.fill());
+            }
+
+            String current = "elevenlabs".equals(engine)
+                    ? cfg.optString("el_voice_id", "") : cfg.optString("tts_voice", "");
+            box.addView(Sheet.section(a, "صدا"), Ui.fill());
+            box.addView(Sheet.item(a, "انتخاب صدا",
+                            current.isEmpty() ? "فهرست صداهای همین موتور" : "فعلی: " + current,
+                            null, () -> voicePicker(a, engine, current)), Ui.fill());
+            box.addView(Sheet.divider(a), Ui.fill());
+            box.addView(Sheet.item(a, "مدل", "elevenlabs".equals(engine)
+                    ? cfg.optString("el_model", "") : cfg.optString("tts_model", ""), null,
+                    () -> modelPicker(a, engine)), Ui.fill());
+            box.addView(Sheet.divider(a), Ui.fill());
+            box.addView(Sheet.item(a, "یک جمله تست کن",
+                    "«سلام عماد، من جارویس هستم»", null, () -> {
+                        Api.post("/voice/out", Api.body("text",
+                                "سلام عماد، من جارویس هستم و آماده‌ام."), 90000, res -> {
+                            if (!res.optBoolean("ok", false)) {
+                                toast(a, "صدا نیامد: " + res.optString("error", "?"));
+                                return;
+                            }
+                            toast(a, res.optString("model", "") + " · " + res.optInt("ms", 0) + "ms");
+                        }, msg -> toast(a, "نشد: " + msg));
+                    }), Ui.fill());
+            Sheet.show(a, "صدا", box);
+        }, msg -> {
+            spin.dismiss();
+            toast(a, "تنظیمات صدا نیامد: " + msg);
+        });
+    }
+
+    private static void setVoice(Activity a, JSONObject body, String what) {
+        Api.post("/voice/config", body, 20000, res -> {
+            toast(a, res.optBoolean("ok", false) ? what + " ثبت شد" : "نشد");
+            voice(a);
+        }, msg -> toast(a, "نشد: " + msg));
+    }
+
+    private static void voicePicker(Activity a, String engine, String current) {
+        AlertDialog spin = busy(a, "صداها…");
+        Api.get("/voice/voices?engine=" + engine, 30000, res -> {
+            spin.dismiss();
+            JSONArray rows = res.optJSONArray("voices");
+            LinearLayout box = Ui.col(a);
+            if (rows == null || rows.length() == 0) {
+                box.addView(Ui.text(a, "فهرست صداها نیامد", 12.5f, Ui.FAINT, false), Ui.fill());
+            }
+            for (int i = 0; rows != null && i < rows.length(); i++) {
+                JSONObject v = rows.optJSONObject(i);
+                if (v == null) {
+                    continue;
+                }
+                final String id = v.optString("id", "");
+                String name = v.optString("name", id);
+                String sub = v.optString("lang", "") + (v.optString("accent").isEmpty()
+                        ? "" : " · " + v.optString("accent"));
+                boolean on = id.equals(current);
+                box.addView(Sheet.item(a, name, on ? "فعال" : sub, on ? Ui.ACCENT : null,
+                        () -> setVoice(a, "elevenlabs".equals(engine)
+                                        ? Api.body("el_voice_id", id)
+                                        : Api.body("tts_voice", id), "صدا")), Ui.fill());
+                box.addView(Sheet.divider(a), Ui.fill());
+            }
+            Sheet.show(a, "صدا", box);
+        }, msg -> {
+            spin.dismiss();
+            toast(a, "نیامد: " + msg);
+        });
+    }
+
+    private static void modelPicker(Activity a, String engine) {
+        LinearLayout box = Ui.col(a);
+        String[] models = "elevenlabs".equals(engine)
+                ? new String[]{"eleven_v3", "eleven_v4_turbo", "eleven_multilingual_v2", "eleven_turbo_v2_5"}
+                : new String[]{"gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts",
+                "gemini-3.1-flash-tts-preview"};
+        for (String m : models) {
+            box.addView(Sheet.item(a, m, "elevenlabs".equals(engine) ? "ElevenLabs" : "Gemini",
+                    null, () -> setVoice(a, "elevenlabs".equals(engine)
+                            ? Api.body("el_model", m) : Api.body("tts_model", m), "مدل")), Ui.fill());
+            box.addView(Sheet.divider(a), Ui.fill());
+        }
+        Sheet.show(a, "مدل صدا", box);
+    }
+
     // --------------------------------------------------------------------- helpers --
     /** Our own loading panel: a dark rounded card with one line, not the system spinner box. */
     private static AlertDialog busy(Activity a, String text) {

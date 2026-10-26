@@ -592,6 +592,20 @@ PROVIDERS = [
          {"id": "deepseek-ai/DeepSeek-V4.1-Flash", "label": "DeepSeek V4.1 Flash",
           "tools": True, "vision": True},
      ]},
+    # The only provider measured to work from an Iranian mobile network with the VPN **off**:
+    # api.avalai.ir answered in 0.77 s for the model list and 1.02 s for a real chat, while
+    # api.river.ai / openrouter.ai / api.telegram.org all timed out. This is what makes the
+    # console usable without a VPN.
+    {"id": "avalai", "label": "AvalAI", "key_env": "AVALAI_API_KEY",
+     "key_url": "https://avalai.ir", "voice": False, "kind": "openai",
+     "base_url": "https://api.avalai.ir/v1",
+     "note": "بدون نیاز به VPN",
+     "models": [
+         {"id": "deepseek-v4.1-flash", "label": "DeepSeek V4.1 Flash", "tools": True, "vision": False},
+         {"id": "deepseek-chat", "label": "DeepSeek Chat", "tools": True, "vision": False},
+         {"id": "qwen3.6-flash", "label": "Qwen 3.6 Flash", "tools": True, "vision": False},
+         {"id": "glm-5.3-flash", "label": "GLM 5.3 Flash", "tools": True, "vision": False},
+     ]},
     {"id": "google_ai_studio", "label": "Google AI Studio", "key_env": "GEMINI_API_KEY",
      "key_url": "https://aistudio.google.com/apikey", "voice": True, "kind": "openai",
      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -791,7 +805,7 @@ async def providers_default(req: Request):
 # Preferred order. River AI runs the fastest model measured on this handset, but its endpoint
 # is not reachable on every network path this phone uses (measured 2026-10-26: fine through a
 # US exit, TCP 443 dead through a Berlin one), so the default is whatever actually answers.
-PREFERRED = ["river", "google_ai_studio", "openrouter", "agentrouter"]
+PREFERRED = ["river", "avalai", "google_ai_studio", "openrouter", "agentrouter"]
 
 
 def _preferred_order() -> List[str]:

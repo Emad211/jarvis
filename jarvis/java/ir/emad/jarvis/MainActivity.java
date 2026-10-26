@@ -673,6 +673,7 @@ public class MainActivity extends Activity {
                 "پرووایدرها و کلیدها",
                 "تنظیمات",
                 "راه‌اندازی اولیه",
+                "صدا و صدای جارویس",
                 ttsOn ? "صدا روی پاسخ‌ها: روشن" : "صدا روی پاسخ‌ها: خاموش",
                 "کپی آخرین پاسخ");
         Sheet.rows(this, "منو", items, which -> {
@@ -711,6 +712,9 @@ public class MainActivity extends Activity {
                             setupWizard();
                             break;
                         case 10:
+                            Panels.voice(this);
+                            break;
+                        case 11:
                             ttsOn = !ttsOn;
                             prefs.edit().putBoolean("tts", ttsOn).apply();
                             toast(ttsOn ? "صدا روشن شد" : "صدا خاموش شد");

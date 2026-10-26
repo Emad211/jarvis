@@ -4,11 +4,12 @@ One repo for both halves of the system. Background history: `../hermes-handoff/H
 (written 2026-10-21; parts of its "known issues" are fixed here — trust this file and the code first).
 
 ## Layout
-- `java/`, `res/`, `assets/`, `AndroidManifest.xml`, `build.sh` — **Hermes Control** app
-  (`ir.emad.hermesctl`), a pure supervisor/health client of gwctl. No Gradle; do not add it.
-- `jarvis/` — **Jarvis** app (`ir.emad.jarvis`), the chat console: streaming answers, live
-  tool cards, approvals, mic/TTS. Talks only to `jarvisd` on `127.0.0.1:8780`.
+- `jarvis/` — **Jarvis** app (`ir.emad.jarvis`), the only app: chat console with streaming
+  answers, live tool cards, approvals, mic/TTS, personas, skills/MCP, cron, services and voice
+  settings. Talks only to `jarvisd` on `127.0.0.1:8780`.
   Build with `pwsh -File jarvis/build.ps1` (add `-Install` to push it to the phone).
+  The old **Hermes Control** app (`ir.emad.hermesctl`, `java/` + `res/` + `build.sh`) was
+  deleted on 2026-10-26: everything worth keeping lives in the panels above.
 - `phone/` — mirror of the phone's Termux `$HOME` (scripts, gwctl, bridge, SOUL, skills).
   `phone/.hermes/config.yaml` is a **reference snapshot only**: it is live state on the phone,
   edited via `hermes config set` / gwctl, and `pc/deploy-phone.sh` never pushes it.
@@ -53,30 +54,35 @@ One repo for both halves of the system. Background history: `../hermes-handoff/H
 - gwctl v3 API is documented in its docstring; most endpoints take `?profile=`.
 - Device control goes through Shizuku `rish` (uid 2000, not root). The `phone-*` helpers source
   `phone-env`, which sets `RISH_APPLICATION_ID=com.termux`.
-- Models: primary `google_ai_studio/gemini-3.5-flash`, then `fallback_providers` (Gemini 3.8 /
-  3.5-lite, free OpenRouter models, AgentRouter `gpt-6.1-sol`, Antigravity). Providers without a
-  key are skipped. The Google key is on the **free API tier** (Pro models return 429 until billing
-  is linked in AI Studio). AgentRouter dropped `deepseek-v4-flash`; it now serves only
-  `gpt-6.1-sol` / `gpt-6-astra` (`/v1/messages` and `/v1/responses`, not chat/completions).
-  Google's OpenAI-compatible base is `.../v1beta/openai`. OpenRouter/Gemini/Antigravity need the
-  phone's VPN on; AgentRouter does not (it needs the `User-Agent: claude-cli/…` header).
+- Models: primary **River AI** `deepseek-ai/DeepSeek-V4.1-Flash-1017` (measured 1.1 s for a tiny
+  chat through a working VPN exit; it is also the model the builder of this project runs on).
+  `POST /providers/autoselect` probes every provider with a real request and makes the first
+  one that answers the default, so the console follows the network instead of a fixed choice.
+  **AvalAI** (`api.avalai.ir`, `deepseek-v4.1-flash`) is the only provider measured to work
+  from an Iranian mobile network with **no VPN** — keep it as the fallback for that case. Then
+  Gemini and OpenRouter. Providers without a key are skipped, and the fallback chain drops any
+  provider the last probe could not reach. AgentRouter dropped `deepseek-v4-flash`; it now
+  serves only `gpt-6.1-sol` / `gpt-6-astra` (`/v1/messages`, needs a `claude-cli/…` User-Agent).
 
 ## Build / install the app
-```bash
-./build.sh                       # aapt2 -> javac --release 8 -> d8 -> zipalign -> apksigner
-adb -s <phone-ip>:5555 install -r dist/hermes-control.apk
+```powershell
+pwsh -File jarvis\build.ps1 -Install      # aapt2 -> javac --release 8 -> d8 -> zipalign -> sign -> adb install
 ```
-aapt2/d8/apksigner/zipalign are native Windows binaries: MSYS does not translate their path
-arguments, so `build.sh` passes `C:/…` paths (`cygpath -m`). With adb from git-bash, set
-`MSYS_NO_PATHCONV=1` for device paths like `/sdcard/...`.
+aapt2/d8/apksigner/zipalign are native Windows binaries and MSYS does not translate their path
+arguments, so the script passes `C:/…` paths itself. Build from PowerShell, not git-bash.
 
 ## Rules
 - Reply to the user in Persian, short and direct; act instead of instructing; verify before claiming.
 - Never bind gwctl beyond 127.0.0.1. Watchdog stays a JobScheduler job (no foreground service).
 - Never launch a supervised service with bare `nohup`; use `hermes-svc`.
 - Keep `allow-external-apps=true` in `~/.termux/termux.properties` (the app's wake button needs it).
-- TTS: the console uses Gemini TTS (`tts.provider: gemini`) because the ElevenLabs key
-  answers 403 from this phone (`eleven_v4_turbo` stays the model if ElevenLabs is ever used).
+- TTS: **ElevenLabs** `eleven_v3` with a Persian voice (`ndcUYGFbbd96WXiZVVaQ` = Roya) is the
+  default — measured 2.4 s for a sentence, and it is the only engine with real Persian voices
+  (Hooman, Connery, Aran, Kaveh, Setareh, Niloofar). Gemini TTS stays as the quota-free
+  fallback. **Both providers are unreachable from an Iranian network**: `api.elevenlabs.io`
+  answers 403 from Google's frontend and `api.river.ai` (a Google Cloud IP in Finland) times
+  out. They work through a VPN whose exit is not blocked — ExpressVPN did, a Berlin/Eweka exit
+  did not.
 - Phone scripts must keep LF line endings (`.gitattributes` enforces it).
 - `jarvisd` and gwctl are loopback-only, no auth by design (same trust model). Do not add a
   second listener on a non-loopback address without a token.
