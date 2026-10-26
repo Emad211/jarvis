@@ -19,15 +19,91 @@ Design rules
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import time
+import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 RISH = "rish"
 ADB = "adb"
 ADB_ADDR = "127.0.0.1:5555"
+
+# ---------------------------------------------------------------- the app's own hands --
+# Jarvis can drive the phone itself through an AccessibilityService (see jarvis/Bridge.java).
+# That lane is tried first because it has no prerequisites beyond one system toggle, while adb
+# needs wireless debugging paired and Shizuku needs a second app started by hand. Everything
+# still falls back to adb, then rish, so an older APK or a disabled service changes nothing but
+# the latency.
+BRIDGE = "http://127.0.0.1:8791"
+_BRIDGE_STATE = [0.0, False]   # [checked_at, ready]
+# intents the bridge can do; `screenshot` is excluded because its file lives in the app's
+# private cache, which Termux cannot read — that one keeps using adb.
+BRIDGE_INTENTS = {"open_app", "open_url", "dial", "tap", "swipe", "key", "type",
+                  "clipboard", "volume", "info", "ui"}
+BRIDGE_NAMES = {"ui": "screen"}
+
+
+def bridge_ready(refresh: bool = False) -> bool:
+    """Cheap /ping against the app, cached for 20 s."""
+    now = time.time()
+    if not refresh and now - _BRIDGE_STATE[0] < 20:
+        return _BRIDGE_STATE[1]
+    ok = False
+    try:
+        with urllib.request.urlopen(BRIDGE + "/ping", timeout=1.5) as r:
+            ok = json.loads(r.read().decode("utf-8", "ignore")).get("ok") is True
+    except Exception:  # noqa: BLE001
+        ok = False
+    _BRIDGE_STATE[0], _BRIDGE_STATE[1] = now, ok
+    return ok
+
+
+def bridge(intent: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Run one intent through the app. None means "not handled here, use the shell lanes"."""
+    if not bridge_ready():
+        return None
+    name = BRIDGE_NAMES.get(intent, intent)
+    payload = {"intent": name, "args": dict(args)}
+    if intent == "open_app":
+        query = str(args.get("query") or args.get("package") or args.get("app") or "")
+        pkg = args.get("package") or (resolve_package(query) if query else "")
+        if not pkg:
+            return None
+        payload["args"] = {"package": pkg}
+    if intent == "key" and "name" not in args:
+        keymap = {"home": "home", "back": "back", "recents": "recents", "recent": "recents",
+                  "notifications": "notifications", "settings": "quicksettings",
+                  "lock": "lock", "power": "lock"}
+        payload["args"] = {"name": keymap.get(str(args.get("key", "")).lower(), "home")}
+    try:
+        req = urllib.request.Request(BRIDGE + "/act",
+                                     data=json.dumps(payload).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            res = json.loads(r.read().decode("utf-8", "ignore"))
+    except Exception:  # noqa: BLE001
+        return None
+    if not res.get("ok"):
+        # a11y off or the action failed: let the shell lanes try, they may still work
+        return None
+    out = {"ok": True, "intent": intent, "source": "bridge"}
+    if intent == "ui":
+        out["detail"] = res.get("text", "")
+        out["text"] = res.get("text", "")
+    elif intent == "info":
+        for k in ("model", "sdk", "battery"):
+            if k in res:
+                out[k] = res[k]
+        out["detail"] = "%s · API %s" % (res.get("model", ""), res.get("sdk", ""))
+    elif intent == "clipboard" and "text" in res:
+        out["text"] = res.get("text", "")
+        out["detail"] = res.get("text", "")
+    else:
+        out["detail"] = "ok"
+    return out
 SHOT_DIR = os.path.expanduser("~/shots")
 TMP = "/data/local/tmp"
 ENV = dict(os.environ, RISH_APPLICATION_ID="com.termux", PATH=os.path.expanduser("~/.local/bin")
@@ -541,6 +617,13 @@ def run(intent: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                 "detail": "این کار سریع پشتیبانی نمی‌شود: " + str(intent),
                 "known": sorted(INTENTS)}
     started = time.time()
+    # The app's own hands first: it needs no adb pairing and no Shizuku, which is the whole
+    # difference between "install three apps and pair wireless debugging" and "flip one toggle".
+    if intent in BRIDGE_INTENTS:
+        via = bridge(intent, args or {})
+        if via is not None:
+            via.setdefault("ms", int((time.time() - started) * 1000))
+            return via
     try:
         return fn(args or {})
     except Exception as exc:  # noqa: BLE001

@@ -1593,6 +1593,17 @@ def boot() -> None:
         sync_builtins()
     except Exception as exc:  # noqa: BLE001
         print("jarvisd: provider sync failed: %s" % exc, flush=True)
+    # MCP servers have to be registered *before* the first agent is built. Discovery costs
+    # 15-20 s, and an agent built without it answers a tool request by printing a raw
+    # <tool_call> block instead of calling anything. Paying it here, once, in a background
+    # thread, buys every later turn a real tool.
+    try:
+        if load_config().get("mcp_servers"):
+            from tools.mcp_tool import discover_mcp_tools
+            added = discover_mcp_tools() or []
+            print("jarvisd: mcp discovery ready (%s)" % ", ".join(added[:6]), flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print("jarvisd: mcp discovery skipped: %s" % exc, flush=True)
     warm_up()
     if os.environ.get("JARVIS_AUTOSELECT", "1") != "0":
         try:
