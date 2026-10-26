@@ -418,6 +418,7 @@ public class MainActivity extends Activity {
             row.text.append(res.optString("detail", ""));
             row.media = res.optString("media", "");
             row.totalMs = res.optInt("ms", 0);
+            row.actionSource = res.optString("source", "");
             notifyList();
         }, msg -> {
             row.actionOk = false;

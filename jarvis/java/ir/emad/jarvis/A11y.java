@@ -302,13 +302,41 @@ public class A11y extends AccessibilityService {
         }
     }
 
+    // Android 10+ (API 29) only lets the *focused* app or the default IME read the clipboard:
+    // ClipboardManager.getPrimaryClip() returns null for a background app like this service.
+    // Measured on the A53 / Android 16 build: set works, every read came back empty — from this
+    // service and from `termux-clipboard-get` alike. The system cannot be talked out of it, so
+    // remember what we put there ourselves: for the console that is the whole use case
+    // (clipboard-set + KEYCODE_PASTE is how Persian text is typed), and answering "the value we
+    // just set, 3 s ago" is honest as long as we say it is a cache.
+    private static String lastCopied = null;
+    private static long lastCopiedAt = 0L;
+    private static final long CACHE_TTL_MS = 10 * 60 * 1000L;
+
     String clipboardGet() {
         ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        if (cm == null || cm.getPrimaryClip() == null || cm.getPrimaryClip().getItemCount() == 0) {
-            return "";
+        String live = "";
+        if (cm != null && cm.getPrimaryClip() != null && cm.getPrimaryClip().getItemCount() > 0) {
+            CharSequence t = cm.getPrimaryClip().getItemAt(0).coerceToText(this);
+            live = t == null ? "" : t.toString();
         }
-        CharSequence t = cm.getPrimaryClip().getItemAt(0).coerceToText(this);
-        return t == null ? "" : t.toString();
+        if (!live.isEmpty()) {
+            return live;
+        }
+        // Blocked by the background-read rule: fall back to the value we set, if it is recent.
+        if (lastCopied != null && System.currentTimeMillis() - lastCopiedAt < CACHE_TTL_MS) {
+            return lastCopied;
+        }
+        return "";
+    }
+
+    /** True when clipboardGet() is answering from the cache rather than a live system read. */
+    boolean clipboardWasCached() {
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        boolean readable = cm != null && cm.getPrimaryClip() != null
+                && cm.getPrimaryClip().getItemCount() > 0;
+        return !readable && lastCopied != null
+                && System.currentTimeMillis() - lastCopiedAt < CACHE_TTL_MS;
     }
 
     boolean clipboardSet(String text) {
@@ -317,6 +345,8 @@ public class A11y extends AccessibilityService {
             return false;
         }
         cm.setPrimaryClip(ClipData.newPlainText("jarvis", text));
+        lastCopied = text;
+        lastCopiedAt = System.currentTimeMillis();
         return true;
     }
 

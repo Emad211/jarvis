@@ -45,7 +45,11 @@ _BRIDGE_STATE = [0.0, False]   # [checked_at, ready]
 # private cache, which Termux cannot read — that one keeps using adb.
 BRIDGE_INTENTS = {"open_app", "open_url", "dial", "tap", "swipe", "key", "type",
                   "clipboard", "volume", "info", "ui", "screenshot",
-                  "battery", "notifications"}
+                  "battery"}
+# `notifications` is deliberately NOT here: Bridge.java has no such action (measured —
+# `{"intent":"notifications"}` answers `{"ok":false,"error":"unknown_intent"}`), so it only
+# added a wasted probe before falling through to adb. If the app ever grows that action,
+# put it back and drop the shell lane below.
 BRIDGE_NAMES = {"ui": "screen", "battery": "info"}
 
 
@@ -60,7 +64,13 @@ def bridge_ready(refresh: bool = False) -> bool:
     ok = False
     try:
         with urllib.request.urlopen(BRIDGE + "/ping", timeout=1.5) as r:
-            ok = json.loads(r.read().decode("utf-8", "ignore")).get("ok") is True
+            info = json.loads(r.read().decode("utf-8", "ignore"))
+        # `ok` says the HTTP server answers; `a11y` says the accessibility service is bound and
+        # can actually act. A bridge with a11y off only costs a probe and answers `a11y_off`, so
+        # it counts as not ready — measured today: the service was off and every intent silently
+        # fell through to adb, which looks like "the bridge is slow" instead of "a11y is off".
+        # Negative answers are cached for 2 s only, so flipping the toggle recovers fast.
+        ok = info.get("ok") is True and info.get("a11y", True) is not False
     except Exception:  # noqa: BLE001
         ok = False
     _BRIDGE_STATE[0], _BRIDGE_STATE[1] = now, ok
@@ -104,6 +114,13 @@ def bridge(intent: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not res.get("ok"):
         # a11y off or the action failed: let the shell lanes try, they may still work
         return None
+    if intent == "clipboard" and "text" not in args:
+        if not str(res.get("text") or "").strip():
+            # The app answered `ok` with an empty clipboard. That is Android's background
+            # read rule, not an empty clipboard (measured: the same is true of
+            # termux-clipboard-get). Do NOT report success — let the shell lane try, and if
+            # it is empty too the intent tells the truth (`clipboard_unreadable`).
+            return None
     out = {"ok": True, "intent": intent, "source": "bridge"}
     if intent == "ui":
         out["detail"] = res.get("text", "")
@@ -139,6 +156,9 @@ def bridge(intent: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return out
 SHOT_DIR = os.path.expanduser("~/shots")
 TMP = "/data/local/tmp"
+# Which shell lane the last sh() call really used. Several intents have no bridge action,
+# so their result has to name the lane honestly instead of returning `source: null`.
+_SH_LANE = ["adb"]
 ENV = dict(os.environ, RISH_APPLICATION_ID="com.termux", PATH=os.path.expanduser("~/.local/bin")
            + ":" + os.environ.get("PATH", ""))
 
@@ -216,10 +236,12 @@ def sh(command: str, timeout: float = 12.0) -> Tuple[int, str]:
                                timeout=timeout, env=ENV)
             out = (p.stdout or "") + (p.stderr or "")
             if p.returncode == 0:
+                _SH_LANE[0] = "adb"
                 return 0, out.strip()
             # adb's own failure (device gone) is worth one rish retry; a remote exit
             # code is a real answer, so pass it back as-is.
             if out.strip() and "device" not in out.lower():
+                _SH_LANE[0] = "adb"
                 return p.returncode, out.strip()
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
@@ -227,6 +249,7 @@ def sh(command: str, timeout: float = 12.0) -> Tuple[int, str]:
         p = subprocess.run([RISH, "-c", command], capture_output=True, text=True,
                            timeout=timeout, env=ENV)
         out = (p.stdout or "") + (p.stderr or "")
+        _SH_LANE[0] = "rish"
         return p.returncode, out.strip()
     except subprocess.TimeoutExpired:
         return 124, "timeout"
@@ -294,13 +317,74 @@ def resolve_package(query: str) -> Optional[str]:
 
 
 def _ok(intent: str, started: float, detail: str, **extra: Any) -> Dict[str, Any]:
+    extra.setdefault("source", _SH_LANE[0])
     return dict(ok=True, intent=intent, ms=int((time.time() - started) * 1000),
                 detail=detail, **extra)
 
 
-def _err(intent: str, started: float, detail: str) -> Dict[str, Any]:
+def _err(intent: str, started: float, detail: str, **extra: Any) -> Dict[str, Any]:
+    extra.setdefault("source", _SH_LANE[0])
     return dict(ok=False, intent=intent, ms=int((time.time() - started) * 1000),
-                detail=detail)
+                detail=detail, **extra)
+
+
+def _focus(want: Any = (), tries: int = 1, delay: float = 0.15) -> str:
+    """The window that currently has input focus, e.g. `com.android.settings/…Settings`.
+
+    With ``want`` it polls: `cmd statusbar expand-notifications` returns *before* the shade
+    takes focus (measured: expand 166 ms, NotificationShade focused ~200 ms later), so a
+    single read right after the command says "not opened" when it in fact opened.
+    """
+    def read() -> str:
+        code, out = sh("dumpsys window 2>/dev/null | grep -m1 mCurrentFocus")
+        return out.split("mCurrentFocus=")[-1].strip() if code == 0 else ""
+
+    text = read()
+    for _ in range(max(0, tries - 1)):
+        if want and any(w in text.lower() for w in want):
+            break
+        time.sleep(delay)
+        text = read()
+    return text
+
+
+def _volume_index() -> str:
+    """Music-stream volume index, straight from the settings provider (~50 ms)."""
+    code, out = sh("settings get system volume_music_speaker")
+    return out.strip() if code == 0 else ""
+
+
+# What we can read back to prove an intent worked. `focus` compares the focused window,
+# `volume` compares the music-stream index. Measured: focus 180–195 ms, volume ~50 ms.
+VERIFY = {"open_app": "focus", "dial": "focus", "notifications": "focus", "volume": "volume"}
+
+
+def _readback(kind: str) -> str:
+    return _volume_index() if kind == "volume" else _focus()
+
+
+def _verified(intent: str, args: Dict[str, Any], before: str) -> Optional[bool]:
+    """Did the device state actually change the way the intent promised?"""
+    kind = VERIFY.get(intent)
+    if not kind:
+        return None
+    if kind == "volume":
+        after = _volume_index()
+        if not after:
+            return None                    # could not read: honest "unknown", not "yes"
+        return bool(before) and after != before
+    want: Any = {"dial": ("dialer", "dialtacts", "contacts", "incall"),
+                 "notifications": ("notification", "shade")}.get(intent)
+    if want is None:
+        pkg = str(args.get("package") or "")
+        if not pkg:
+            query = str(args.get("name") or args.get("app") or args.get("query") or "")
+            pkg = resolve_package(query) or ""
+        want = (pkg.lower(),) if pkg else ()
+    if not want:
+        return None
+    after = _focus(want, tries=3)
+    return any(word in after.lower() for word in want)
 
 
 # --------------------------------------------------------------------------- intents --
@@ -424,18 +508,35 @@ def clipboard_set(text: str) -> Tuple[int, str]:
 
 
 def clipboard(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Set, or read, the clipboard — and never answer a silent empty string.
+
+    Android 10+ lets only the *focused* app (or the default IME) read the clipboard, and the
+    Termux process is never that app. Measured on this phone: `setPrimaryClip` through the
+    accessibility service works, but every read — the bridge's `clipboard_get` **and**
+    `termux-clipboard-get` — comes back empty, even with the shade as the focused window.
+    So a read that yields nothing is reported as `clipboard_unreadable`, not as «(خالی)».
+    """
     started = time.time()
     if "text" in args:
         rc, out = clipboard_set(str(args["text"]))
-        return _ok("clipboard_set", started, "در کلیپ‌بورد گذاشته شد") if rc == 0 \
-            else _err("clipboard_set", started, out)
+        return (_ok("clipboard_set", started, "در کلیپ‌بورد گذاشته شد", source="termux-api")
+                if rc == 0 else _err("clipboard_set", started, out, source="termux-api"))
     try:
         p = subprocess.run(["termux-clipboard-get"], capture_output=True, text=True,
                            timeout=8, env=ENV)
         text = (p.stdout or "").strip()
-        return _ok("clipboard_get", started, text[:300] or "(خالی)", text=text)
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return _err("clipboard_get", started, str(exc))
+        return _err("clipboard_get", started, str(exc), source="termux-api",
+                    error="clipboard_unreadable")
+    if not text:
+        return _err("clipboard_get", started,
+                    "کلیپ‌بورد در پس‌زمینه خوانده نمی‌شود: اندروید ۱۰+ خواندن را فقط به اپ "
+                    "فعال یا کیبورد پیش‌فرض می‌دهد (هر دو مسیر برگشتند خالی). متن را از "
+                    "اپ فعال بخوان یا با «type» بنویس.",
+                    source="termux-api", error="clipboard_unreadable",
+                    paths_tried=["bridge:clipboard_get", "termux-clipboard-get"])
+    return _ok("clipboard_get", started, text[:300], text=text, source="termux-api",
+               verified=True)
 
 
 def volume(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -444,9 +545,24 @@ def volume(args: Dict[str, Any]) -> Dict[str, Any]:
     keycode = {"up": 24, "down": 25, "mute": 164}.get(what)
     if keycode is None:
         return _err("volume", started, "up/down/mute لازم است")
-    for _ in range(int(args.get("steps") or 1)):
+    before = _volume_index()
+    steps = int(args.get("steps") or 1)
+    for _ in range(steps):
         sh(f"input keyevent {keycode}")
-    return _ok("volume", started, what)
+    after = _volume_index()
+    lane = "keyevent"
+    if before and after and before == after and what in ("up", "down"):
+        # A foreground app can swallow hardware volume keys (measured: Settings did). The audio
+        # service does not care what has focus, so use it before giving up.
+        code, out = sh("cmd media_session volume --stream 3 --adj %s"
+                       % ("raise" if what == "up" else "lower"))
+        if code == 0:
+            lane = "media_session"
+            after = _volume_index()
+    # `164` toggles mute, and "up" at maximum changes nothing: read the stream index back so
+    # the card can say «انجام شد» only when it really moved.
+    return _ok("volume", started, what, before=before, after=after, via=lane,
+               verified=bool(before) and bool(after) and before != after)
 
 
 def brightness(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -530,11 +646,27 @@ def dial(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def notifications(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Open the notification shade, then *check* that it opened.
+
+    Measured on this build: `cmd statusbar expand-notifications` exits 0 in ~166 ms and the
+    read-back `mCurrentFocus=…NotificationShade` shows up ~190 ms later. The old version
+    returned «نوار اعلان باز شد» unconditionally, even when the command failed — a false
+    success is worse than an error, so the claim is now conditional on the read-back.
+    """
     started = time.time()
-    rc, out = sh("cmd statusbar expand-notifications")
-    if rc != 0:
-        sh("input keyevent 83")
-    return _ok("notifications", started, "نوار اعلان باز شد")
+    code, out = sh("cmd statusbar expand-notifications")
+    how = "cmd statusbar expand-notifications"
+    if code != 0:
+        code, out = sh("input keyevent 83")          # KEYCODE_NOTIFICATION
+        how = "input keyevent 83"
+    if code != 0:
+        return _err("notifications", started, "باز کردن نوار اعلان ناموفق بود: " + out[:160],
+                    verified=False, via=how)
+    focus = _focus(("notification", "shade"), tries=4)
+    opened = "notification" in focus.lower() or "shade" in focus.lower()
+    return _ok("notifications", started, "نوار اعلان باز شد" if opened
+               else "فرستاده شد ولی باز بودن نوار تأیید نشد",
+               verified=opened, focus=focus[:80], via=how)
 
 
 def ui_dump(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -650,15 +782,37 @@ def run(intent: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                 "detail": "این کار سریع پشتیبانی نمی‌شود: " + str(intent),
                 "known": sorted(INTENTS)}
     started = time.time()
+    args = args or {}
+    # Read the "before" state only when the caller asked to prove the action, so the default
+    # path keeps its bridge latency (open_app 96 ms with verify:false, ~280 ms with it).
+    kind = VERIFY.get(intent)
+    want_verify = bool(args.get("verify")) and kind is not None
+    before = _readback(kind) if want_verify else ""
     # The app's own hands first: it needs no adb pairing and no Shizuku, which is the whole
     # difference between "install three apps and pair wireless debugging" and "flip one toggle".
     if intent in BRIDGE_INTENTS:
-        via = bridge(intent, args or {})
+        via = bridge(intent, args)
         if via is not None:
             via.setdefault("ms", int((time.time() - started) * 1000))
+            if want_verify:
+                verdict = _verified(intent, args, before)
+                if verdict is False:
+                    # The app said ok but the screen disagrees (measured: `dial` through the
+                    # bridge reported ok while Settings stayed focused). Try the shell lane
+                    # once, then report whichever proof actually exists.
+                    retry = fn(args)
+                    if retry.get("ok"):
+                        retry["bridge_missed"] = True
+                        retry["verified"] = _verified(intent, args, before)
+                        retry.setdefault("ms", int((time.time() - started) * 1000))
+                        return retry
+                via["verified"] = verdict
             return via
     try:
-        return fn(args or {})
+        result = fn(args)
+        if want_verify and result.get("ok") and "verified" not in result:
+            result["verified"] = _verified(intent, args, before)
+        return result
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "intent": intent,
                 "ms": int((time.time() - started) * 1000),

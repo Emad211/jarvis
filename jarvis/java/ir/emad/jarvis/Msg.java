@@ -37,6 +37,8 @@ final class Msg {
     boolean actionOk;
     String actionLabel = "";
     String media = "";
+    /** Which lane actually ran it: "bridge" (the app's own hands), "adb" or "rish". */
+    String actionSource = "";
 
     Msg(String role) {
         this.role = role;

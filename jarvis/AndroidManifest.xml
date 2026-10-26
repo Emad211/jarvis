@@ -11,6 +11,14 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Read-only access to the phone's own data (Data.java). Runtime permissions: the user grants
+         each one in-app, and Data.handle answers {ok:false, needs:"<name>"} until they do.
+         Apps list needs none of these — it reads the launcher query only. -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
     <application
         android:label="Jarvis"
         android:icon="@drawable/ic_launcher"
@@ -43,6 +51,21 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/a11y_service" />
+        </service>
+
+        <!-- The notification shade (Notif.java). A listener service, not a permission dialog: the
+             user enables it once in Settings → Notifications → Device & app notifications → Jarvis,
+             which is why Notif.ready() exists — the app cannot know from a runtime check.
+             `exported=true` is required for the system to bind it; the BIND_ permission is what
+             stops anyone else from binding. -->
+        <service
+            android:name=".Notif"
+            android:exported="true"
+            android:label="Jarvis notifications"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
         </service>
     </application>
 </manifest>

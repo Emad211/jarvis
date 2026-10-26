@@ -193,7 +193,15 @@ final class ChatAdapter extends BaseAdapter {
         }
         card.addView(texts, Ui.margins(Ui.weight(1f), ctx, 8, 0, 0, 0));
         if (m.totalMs != null) {
-            card.addView(Ui.text(ctx, m.totalMs + "ms", 10.5f, Ui.FAINT, false));
+            // The lane matters as much as the number: "bridge" means the app acted on itself
+            // with no adb and no Shizuku, and that is the whole prerequisite story in one word.
+            String lane = "";
+            if ("bridge".equals(m.actionSource)) {
+                lane = " · خود اپ";
+            } else if (!m.actionSource.isEmpty()) {
+                lane = " · " + m.actionSource;
+            }
+            card.addView(Ui.text(ctx, m.totalMs + "ms" + lane, 10.5f, Ui.FAINT, false));
         }
         LinearLayout holder = Ui.col(ctx);
         if (!m.media.isEmpty()) {

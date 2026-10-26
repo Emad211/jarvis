@@ -529,20 +529,38 @@ def _cron_path(ctx) -> str:
     return os.path.join(ctx["HERMES"], "cron", "jobs.json")
 
 
-def _persona_sidecar(ctx) -> Dict[str, str]:
+# A job's persona is *injected into the job's own prompt* at create/edit time, because a
+# `hermes cron` job runs its prompt as the instruction — there is no per-job persona field for
+# Hermes to read, and a sidecar file nobody reads was exactly the bug. The sidecar is kept only
+# as a label for `GET /cron` (so the console can show which persona a job was built with) and
+# to remember the user's own text, so a later edit can re-prefix instead of stacking prompts.
+PERSONA_SEP = "\n\n---\n"
+
+
+def _persona_sidecar(ctx) -> Dict[str, Dict[str, str]]:
+    """{job_id: {persona, base_prompt}} — migrated from the old flat {job_id: persona} shape."""
     path = os.path.join(ctx["JARVIS_DIR"], "cron_personas.json")
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
-        return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
+    out: Dict[str, Dict[str, str]] = {}
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(value, dict):
+                out[str(key)] = {"persona": str(value.get("persona") or ""),
+                                 "base_prompt": str(value.get("base_prompt") or "")}
+            elif isinstance(value, str) and value:
+                out[str(key)] = {"persona": value, "base_prompt": ""}
+    return out
 
 
-def _save_persona_sidecar(ctx, job_id: str, persona: str) -> None:
+def _save_persona_sidecar(ctx, job_id: str, persona: str,
+                          base_prompt: str = "") -> None:
     data = _persona_sidecar(ctx)
     if persona:
-        data[job_id] = persona
+        data[job_id] = {"persona": persona, "base_prompt": base_prompt}
     else:
         data.pop(job_id, None)
     path = os.path.join(ctx["JARVIS_DIR"], "cron_personas.json")
@@ -554,6 +572,27 @@ def _save_persona_sidecar(ctx, job_id: str, persona: str) -> None:
         os.replace(tmp, path)
     except OSError as exc:
         ctx["notify"]("cron: persona sidecar failed: %s" % exc)
+
+
+def _persona_prefix(ctx, persona: str) -> str:
+    """The persona's prompt text, or "" when it is unknown (never fatal for a job)."""
+    if not persona:
+        return ""
+    try:
+        import jarvisd_personas as P  # noqa: PLC0415
+        text = P.persona_prompt(persona, ctx)
+        return (text or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        ctx["notify"]("cron: persona %s unavailable: %s" % (persona, exc))
+        return ""
+
+
+def _with_persona(ctx, prompt: str, persona: str) -> Tuple[str, bool]:
+    """(job prompt to hand Hermes, whether the persona text really went in)."""
+    prefix = _persona_prefix(ctx, persona)
+    if not prefix:
+        return prompt, False
+    return prefix + PERSONA_SEP + prompt, True
 
 
 def _cron_rows(ctx) -> List[Dict[str, Any]]:
@@ -588,7 +627,7 @@ def _cron_rows(ctx) -> List[Dict[str, Any]]:
                      "name": _redact(str(job.get("name") or job.get("id") or ""))[:120],
                      "schedule": str(sched or ""),
                      "prompt": _redact(str(job.get("prompt") or ""))[:2000],
-                     "persona": personas.get(str(job.get("id") or ""), ""),
+                     "persona": "",
                      "enabled": bool(job.get("enabled", job.get("state") == "active")),
                      "next_run": str(job.get("next_run_at") or job.get("next_run") or ""),
                      "last_run": str(job.get("last_run_at") or job.get("last_run") or ""),
@@ -596,6 +635,9 @@ def _cron_rows(ctx) -> List[Dict[str, Any]]:
                      "next_run_ts": _iso_to_epoch(job.get("next_run_at")),
                      "last_run_ts": _iso_to_epoch(job.get("last_run_at")),
                      "deliver": str(job.get("deliver") or "")})
+    for row in rows:  # the persona is now inside `prompt`; show the user's own text as base
+        info = personas.get(row["id"]) or {}
+        row["persona"] = info.get("persona", "") if isinstance(info, dict) else str(info)
     return rows
 
 
@@ -856,14 +898,11 @@ def register(app, ctx):  # noqa: C901
             return err("bad_schedule", "schedule is required")
         if not prompt:
             return err("bad_prompt", "prompt is required")
-        if persona:
-            try:
-                import jarvisd_personas as P  # noqa: PLC0415
-                if P.persona_prompt(persona, ctx) is None:
-                    return err("bad_persona", persona)
-            except Exception:  # noqa: BLE001  (persona module optional at runtime)
-                pass
-        args = ["cron", "create", schedule, prompt, "--deliver", "local"]
+        if persona and _persona_prefix(ctx, persona) == "":
+            return err("bad_persona", persona)
+        # The persona becomes part of the instruction Hermes runs, not a sidecar nobody reads.
+        job_prompt, injected = _with_persona(ctx, prompt, persona)
+        args = ["cron", "create", schedule, job_prompt, "--deliver", "local"]
         if name:
             args += ["--name", name[:80]]
         code, out = _run(ctx, *args, timeout=90)
@@ -872,9 +911,38 @@ def register(app, ctx):  # noqa: C901
             return err("cli_failed", _redact(" ".join(out.split()))[:300])
         job_id = m.group(1)
         if persona:
-            _save_persona_sidecar(ctx, job_id, persona)
-        ctx["notify"]("tools: cron %s created (%s)" % (job_id, schedule))
-        return {"ok": True, "id": job_id}
+            _save_persona_sidecar(ctx, job_id, persona, prompt)
+        ctx["notify"]("tools: cron %s created (%s)%s" % (job_id, schedule,
+                                                         ", persona " + persona if persona else ""))
+        return {"ok": True, "id": job_id, "persona": persona, "persona_in_prompt": injected}
+
+    @app.patch("/cron/{job_id}")
+    async def cron_edit(job_id: str, req: Request):
+        """Change a job's prompt/name/persona; a persona is re-prefixed, never stacked."""
+        if not ID_RE.match(job_id):
+            return err("bad_id", job_id)
+        data = await body(req)
+        info = (_persona_sidecar(ctx).get(job_id) or {})
+        current = next((r for r in _cron_rows(ctx) if r["id"] == job_id), None)
+        if current is None:
+            return err("not_found", job_id, 404)
+        persona = str(data.get("persona", info.get("persona", "")) or "").strip()
+        # the user's own text: what they send, else what we remembered, else the stored prompt
+        base = str(data.get("prompt") or info.get("base_prompt") or current.get("prompt") or "")
+        if persona and _persona_prefix(ctx, persona) == "":
+            return err("bad_persona", persona)
+        job_prompt, injected = _with_persona(ctx, base, persona)
+        args = ["cron", "edit", job_id, "--prompt", job_prompt]
+        if data.get("name"):
+            args += ["--name", str(data["name"])[:80]]
+        if data.get("schedule"):
+            args += ["--schedule", str(data["schedule"])]
+        code, out = _run(ctx, *args, timeout=90)
+        if code != 0:
+            return err("cli_failed", _redact(" ".join(out.split()))[:300])
+        _save_persona_sidecar(ctx, job_id, persona, base)
+        ctx["notify"]("tools: cron %s edited (persona %s)" % (job_id, persona or "-"))
+        return {"ok": True, "id": job_id, "persona": persona, "persona_in_prompt": injected}
 
     @app.post("/cron/{job_id}/run")
     def cron_run(job_id: str):

@@ -147,6 +147,47 @@ final class Bridge {
             args = new JSONObject();
         }
         A11y a11y = A11y.get();
+        // These seven read system data through ordinary Android APIs; they do not need the
+        // accessibility service, so a null `a11y` must not be reported as their failure.
+        boolean needsA11y = true;
+        try {
+            switch (intent) {
+                case "notif_list":
+                case "notif_clear":
+                    needsA11y = false;
+                    JSONObject n = Notif.handle(intent, args);
+                    out.put("ok", n.optBoolean("ok", false));
+                    out.put("error", n.optString("error", ""));
+                    out.put("needs", n.optString("needs", ""));
+                    out.put("count", n.optInt("count", 0));
+                    out.put("items", n.optJSONArray("items") == null
+                            ? new org.json.JSONArray() : n.optJSONArray("items"));
+                    return out;
+                case "calendar_today":
+                case "calendar_range":
+                case "contacts_search":
+                case "sms_recent":
+                case "apps_list":
+                    needsA11y = false;
+                    JSONObject d = Data.handle(activity, intent, args);
+                    out.put("ok", d.optBoolean("ok", false));
+                    out.put("error", d.optString("error", ""));
+                    out.put("needs", d.optString("needs", ""));
+                    out.put("count", d.optInt("count", 0));
+                    out.put("items", d.optJSONArray("items") == null
+                            ? new org.json.JSONArray() : d.optJSONArray("items"));
+                    return out;
+                default:
+                    break;
+            }
+        } catch (Exception e) {
+            try {
+                out.put("ok", false).put("error", e.getClass().getSimpleName());
+            } catch (Exception ignored) {
+                // JSONObject.put only throws on NaN
+            }
+            return out;
+        }
         try {
             out.put("ok", true);
             out.put("intent", intent);
@@ -234,7 +275,7 @@ final class Bridge {
                     out.put("ok", false).put("error", "unknown_intent");
                     break;
             }
-            if (a11y == null) {
+            if (a11y == null && needsA11y) {
                 out.put("error", "a11y_off");
             }
         } catch (Exception e) {
