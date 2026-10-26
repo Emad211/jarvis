@@ -165,8 +165,15 @@ final class Bridge {
                     out.put("text", a11y == null ? "" : a11y.screen());
                     break;
                 case "screenshot": {
-                    out.put("ok", a11y != null);
-                    out.put("path", a11y == null ? "" : a11y.screenshot(args.optString("name")));
+                    String path = a11y == null ? "" : a11y.screenshot(args.optString("name"));
+                    out.put("ok", a11y != null && !path.isEmpty());
+                    out.put("path", path);
+                    // `inline` exists because the file lives in the app's private cache, which
+                    // Termux cannot open. Sending the bytes over loopback is what lets the fast
+                    // path take a screenshot without adb at all.
+                    if (args.optBoolean("inline", false) && !path.isEmpty()) {
+                        out.put("b64", base64(path));
+                    }
                     break;
                 }
                 case "open_app": {
@@ -238,6 +245,27 @@ final class Bridge {
             }
         }
         return out;
+    }
+
+    /** File -> base64, or "" when unreadable. Used only for the screenshot inline path. */
+    private static String base64(String path) {
+        try {
+            java.io.File f = new java.io.File(path);
+            byte[] buf = new byte[(int) f.length()];
+            try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
+                int read = 0;
+                while (read < buf.length) {
+                    int n = in.read(buf, read, buf.length - read);
+                    if (n < 0) {
+                        break;
+                    }
+                    read += n;
+                }
+            }
+            return android.util.Base64.encodeToString(buf, android.util.Base64.NO_WRAP);
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     private static void reply(Socket client, int code, String body) throws Exception {

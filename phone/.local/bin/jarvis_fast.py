@@ -19,12 +19,14 @@ Design rules
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import subprocess
 import time
 import urllib.request
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 RISH = "rish"
@@ -42,14 +44,18 @@ _BRIDGE_STATE = [0.0, False]   # [checked_at, ready]
 # intents the bridge can do; `screenshot` is excluded because its file lives in the app's
 # private cache, which Termux cannot read — that one keeps using adb.
 BRIDGE_INTENTS = {"open_app", "open_url", "dial", "tap", "swipe", "key", "type",
-                  "clipboard", "volume", "info", "ui"}
-BRIDGE_NAMES = {"ui": "screen"}
+                  "clipboard", "volume", "info", "ui", "screenshot",
+                  "battery", "notifications"}
+BRIDGE_NAMES = {"ui": "screen", "battery": "info"}
 
 
 def bridge_ready(refresh: bool = False) -> bool:
-    """Cheap /ping against the app, cached for 20 s."""
+    """Cheap /ping against the app. A *positive* answer is cached for 20 s; a negative one only
+    for 2 s, because the app may simply be starting and a long cache would strand every action
+    on the slow lanes for a whole turn."""
     now = time.time()
-    if not refresh and now - _BRIDGE_STATE[0] < 20:
+    ttl = 20.0 if _BRIDGE_STATE[1] else 2.0
+    if not refresh and now - _BRIDGE_STATE[0] < ttl:
         return _BRIDGE_STATE[1]
     ok = False
     try:
@@ -73,6 +79,15 @@ def bridge(intent: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not pkg:
             return None
         payload["args"] = {"package": pkg}
+    if intent == "clipboard":
+        # the bridge has two separate actions; the intent here is one with optional text
+        payload["intent"] = "clipboard_set" if str(args.get("text") or "") else "clipboard_get"
+    if intent == "screenshot":
+        # the PNG lands in the app's private cache, so ask for the bytes inline and write them
+        # where the rest of the pipeline expects them (~/shots/jv_*.png)
+        payload["args"] = {"name": "jv_%s.png" % uuid.uuid4().hex[:10], "inline": True}
+    elif intent in ("ui", "info", "battery"):
+        payload["args"] = {}
     if intent == "key" and "name" not in args:
         keymap = {"home": "home", "back": "back", "recents": "recents", "recent": "recents",
                   "notifications": "notifications", "settings": "quicksettings",
@@ -93,6 +108,24 @@ def bridge(intent: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if intent == "ui":
         out["detail"] = res.get("text", "")
         out["text"] = res.get("text", "")
+    elif intent == "screenshot":
+        blob = res.get("b64") or ""
+        if not blob:
+            return None  # no bytes came back: let the adb lane try instead
+        name = payload["args"]["name"]
+        shots = os.path.expanduser("~/shots")
+        try:
+            os.makedirs(shots, exist_ok=True)
+            path = os.path.join(shots, name)
+            with open(path, "wb") as fh:
+                fh.write(base64.b64decode(blob))
+        except (OSError, ValueError):
+            return None
+        out["path"] = path
+        out["media"] = "/media/" + name
+        out["detail"] = name
+    elif intent == "battery":
+        out["detail"] = "%s%%" % res.get("battery", "?")
     elif intent == "info":
         for k in ("model", "sdk", "battery"):
             if k in res:
