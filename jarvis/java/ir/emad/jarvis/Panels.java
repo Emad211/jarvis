@@ -438,7 +438,88 @@ final class Panels {
         });
     }
 
-    // -------------------------------------------------------------------- helpers --
+    // --------------------------------------------------------------------- learned --
+    /**
+     * The visible half of self-improvement: every skill the agent wrote or rewrote, newest
+     * first, plus what the curator last did. Without this the learning is invisible, and an
+     * invisible feature may as well not exist.
+     */
+    static void learned(Activity a) {
+        AlertDialog spin = busy(a, "دفتر یادگیری…");
+        Api.getArray("/skills/feed?limit=60", 30000, rows -> {
+            spin.dismiss();
+            LinearLayout box = Ui.col(a);
+            box.addView(Sheet.section(a, "چه یاد گرفت  " + rows.length() + " مورد"), Ui.fill());
+            if (rows.length() == 0) {
+                box.addView(Ui.text(a, "هنوز چیزی یاد نگرفته — اولین کاری که انجام بدهد، "
+                        + "مهارتش را می‌نویسد.", 12.5f, Ui.FAINT, false), Ui.fill());
+            }
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject r = rows.optJSONObject(i);
+                if (r == null) {
+                    continue;
+                }
+                String kind = r.optString("kind", "");
+                int color = "learned".equals(kind) ? Ui.GREEN
+                        : "archived".equals(kind) ? Ui.FAINT : Ui.ACCENT;
+                // The feed's `detail` repeats the skill name that is already in the title, and
+                // mixing it in turned every row into a bidi tangle. Kind + time is enough.
+                String sub = ("learned".equals(kind) ? "یاد گرفت"
+                        : "archived".equals(kind) ? "بایگانی شد" : "ویرایش کرد")
+                        + " · " + clock(r.optLong("at", 0));
+                box.addView(Sheet.item(a, r.optString("title", ""), sub, color,
+                        () -> expertise(a, r.optString("skill", r.optString("id", "")))),
+                        Ui.fill());
+                box.addView(Sheet.divider(a), Ui.fill());
+            }
+            box.addView(Sheet.section(a, "نگهبان حافظه"), Ui.fill());
+            box.addView(Sheet.item(a, "الان مرور کن",
+                            "مهارت‌های تکراری را ادغام و کهنه‌ها را بایگانی می‌کند", null,
+                            () -> Api.post("/curator/run", Api.body(), 40000,
+                                    res -> toast(a, res.optBoolean("started", false)
+                                            ? "شروع شد" : "همین حالا در حال اجراست"),
+                                    msg -> toast(a, "نشد: " + msg))), Ui.fill());
+            Sheet.show(a, "یادگیری", box);
+        }, msg -> {
+            spin.dismiss();
+            toast(a, "نیامد: " + msg);
+        });
+    }
+
+    /** One learned skill: its file, so the user can see exactly what the agent wrote. */
+    private static void expertise(Activity a, String id) {
+        if (id == null || id.isEmpty()) {
+            return;
+        }
+        AlertDialog spin = busy(a, "مهارت…");
+        Api.getArray("/skills?q=" + id, 40000, rows -> {
+            spin.dismiss();
+            LinearLayout box = Ui.col(a);
+            box.setPadding(Ui.dp(a, 16), Ui.dp(a, 4), Ui.dp(a, 16), Ui.dp(a, 12));
+            JSONObject hit = null;
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject r = rows.optJSONObject(i);
+                if (r != null && id.equals(r.optString("id", ""))) {
+                    hit = r;
+                    break;
+                }
+            }
+            if (hit == null) {
+                box.addView(Ui.text(a, "پیدا نشد", 12.5f, Ui.FAINT, false), Ui.fill());
+            } else {
+                box.addView(Sheet.section(a, hit.optString("id", "")), Ui.fill());
+                box.addView(Ui.text(a, hit.optString("description", ""), 13f, Ui.DIM, false),
+                        Ui.fill());
+                box.addView(Sheet.section(a, "استفاده  " + hit.optInt("uses", 0) + " بار"), Ui.fill());
+            }
+            Sheet.show(a, "مهارت", box);
+        }, msg -> {
+            spin.dismiss();
+            toast(a, "نیامد: " + msg);
+        });
+    }
+
+    // --------------------------------------------------------------------- helpers --
     /** Our own loading panel: a dark rounded card with one line, not the system spinner box. */
     private static AlertDialog busy(Activity a, String text) {
         LinearLayout box = Ui.col(a);
@@ -470,6 +551,15 @@ final class Panels {
             return iso == null ? "" : iso;
         }
         return iso.substring(11, 16);
+    }
+
+    /** Epoch seconds -> `14:23` in the phone's own zone. */
+    static String clock(long epoch) {
+        if (epoch <= 0) {
+            return "";
+        }
+        return new java.text.SimpleDateFormat("HH:mm", java.util.Locale.US)
+                .format(new java.util.Date(epoch * 1000L));
     }
 
     private static String human(long sec) {

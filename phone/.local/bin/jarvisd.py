@@ -480,49 +480,6 @@ def _approval_for(session: Session, model: str, reasoning: str):
     return on_approval
 
 
-# ------------------------------------------------------------------------------- voices --
-GEMINI = "https://generativelanguage.googleapis.com/v1beta"
-
-
-def _gem_key() -> str:
-    return read_env("GEMINI_API_KEY") or read_env("GOOGLE_AI_STUDIO_API_KEY")
-
-
-async def stt(wav: bytes) -> str:
-    import httpx
-    key = _gem_key()
-    if not key:
-        return ""
-    body = {"contents": [{"parts": [
-        {"inlineData": {"mimeType": "audio/wav", "data": base64.b64encode(wav).decode()}},
-        {"text": "Transcribe this speech verbatim, in its own language, no commentary."},
-    ]}]}
-    async with httpx.AsyncClient(timeout=90) as client:
-        r = await client.post(f"{GEMINI}/models/gemini-3.5-transcribe:generateContent",
-                              headers={"x-goog-api-key": key}, json=body)
-        if r.status_code != 200:
-            return ""
-        parts = (((r.json().get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
-        return "".join(p.get("text", "") for p in parts).strip()
-
-
-def tts(text: str) -> Dict[str, Any]:
-    """Render speech with the configured Gemini TTS voice; returns {url, seconds}."""
-    from tools.tts_tool import _generate_gemini_tts  # same path the bot uses
-    os.makedirs(AUDIO_DIR, exist_ok=True)
-    name = "jv_%s.mp3" % uuid.uuid4().hex[:10]
-    out = os.path.join(AUDIO_DIR, name)
-    cfg = {"provider": "gemini", "gemini": {"voice": "Kore", "model": "gemini-3.8-flash-tts"}}
-    asyncio.run(_generate_gemini_tts(text, out, cfg))
-    seconds = 0.0
-    try:
-        import wave
-        with wave.open(out):
-            pass
-    except Exception:  # noqa: BLE001
-        pass
-    return {"url": "/audio/" + name, "seconds": seconds}
-
 
 # ------------------------------------------------------------------------------ FastAPI --
 from fastapi import FastAPI, Request, Response  # noqa: E402
@@ -1351,27 +1308,9 @@ async def ask_answer(ask_id: str, req: Request):
     return {"ok": ok}
 
 
-@app.post("/voice/in")
-async def voice_in(request: Request):
-    wav = await request.body()
-    if not wav:
-        return {"ok": False, "error": "empty"}
-    text = await stt(wav)
-    return {"ok": bool(text), "text": text}
 
-
-@app.post("/voice/out")
-async def voice_out(req: Request):
-    body = await _json(req)
-    text = (body.get("text") or "").strip()
-    if not text:
-        return {"ok": False, "error": "empty"}
-    try:
-        info = await asyncio.get_running_loop().run_in_executor(None, tts, text)
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
-    return dict(ok=True, **info)
-
+# Voice lives in jarvisd_voice.py: it owns /voice/in, /voice/out, /voice/stream and
+# /voice/status. Only the audio store stays here, because it is plain file serving.
 
 @app.get("/audio/{name}")
 def audio(name: str):

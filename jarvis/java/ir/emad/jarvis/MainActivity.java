@@ -666,6 +666,7 @@ public class MainActivity extends Activity {
                 "گفتگوی تازه",
                 "گفتگوهای قبلی",
                 "شخصیت‌ها",
+                "چه یاد گرفت",
                 "ابزارها و مهارت‌ها",
                 "زمان‌بندی",
                 "سرویس‌ها و لاگ‌ها",
@@ -689,24 +690,27 @@ public class MainActivity extends Activity {
                             });
                             break;
                         case 3:
-                            Panels.tools(this);
+                            Panels.learned(this);
                             break;
                         case 4:
-                            Panels.cron(this);
+                            Panels.tools(this);
                             break;
                         case 5:
-                            Panels.services(this);
+                            Panels.cron(this);
                             break;
                         case 6:
-                            providersDialog();
+                            Panels.services(this);
                             break;
                         case 7:
-                            settings();
+                            providersDialog();
                             break;
                         case 8:
-                            setupWizard();
+                            settings();
                             break;
                         case 9:
+                            setupWizard();
+                            break;
+                        case 10:
                             ttsOn = !ttsOn;
                             prefs.edit().putBoolean("tts", ttsOn).apply();
                             toast(ttsOn ? "صدا روشن شد" : "صدا خاموش شد");

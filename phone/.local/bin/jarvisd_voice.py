@@ -602,6 +602,17 @@ async def _stt_whisper(wav: bytes, lang: str = "") -> Tuple[str, int]:
     return (resp.json().get("text") or "").strip(), resp.status_code
 
 
+def _prefer_last(items: List[Any], last: str, key=lambda item: item) -> List[Any]:
+    """Try the model that answered last time first: when a free-tier quota is spent its 429
+    costs ~0.4 s per call, and a dead default would otherwise be paid on every utterance."""
+    if not last:
+        return items
+    for i, item in enumerate(items):
+        if key(item) == last:
+            return [items[i]] + items[:i] + items[i + 1:]
+    return items
+
+
 def _stt_chain(cfg: Dict[str, Any]) -> List[Tuple[str, Any]]:
     """(label, function) in the order we are willing to pay for them."""
     chain: List[Tuple[str, Any]] = [(str(cfg["stt_model"]), _stt_gemini)]
@@ -610,7 +621,9 @@ def _stt_chain(cfg: Dict[str, Any]) -> List[Tuple[str, Any]]:
         chain.append((fallback, _stt_gemini))
     if cfg.get("stt_or_fallback") and _or_key():
         chain.append(("openrouter/" + WHISPER_MODEL, _stt_whisper))
-    return chain
+    with _LOCK:
+        last = str(_STATS.get("stt_model") or "")
+    return _prefer_last(chain, last, key=lambda item: item[0])
 
 
 async def transcribe(wav_bytes: bytes) -> Dict[str, Any]:
@@ -880,6 +893,9 @@ async def speak(text: str, voice: str = "", provider: str = "") -> Dict[str, Any
         model = model.strip()
         if model and model not in gem_models:
             gem_models.append(model)
+    with _LOCK:
+        last_model = str(_STATS.get("tts_model") or "")
+    gem_models = _prefer_last(gem_models, last_model, key=lambda item: item)
     attempts: List[Tuple[str, str, str]] = []
     fb = str(cfg.get("tts_fallback_provider") or "none").lower()
     if provider == "elevenlabs":
@@ -897,9 +913,8 @@ async def speak(text: str, voice: str = "", provider: str = "") -> Dict[str, Any
                 if prov == "elevenlabs":
                     audio = await _tts_eleven(text, vc, mdl)
                     model = "elevenlabs/" + mdl
-                    if not _encode_mp3(_ffmpeg_to_wav(audio), path):
-                        with open(path, "wb") as fh:      # already an mp3 from ElevenLabs
-                            fh.write(audio)
+                    with open(path, "wb") as fh:          # ElevenLabs returns mp3 already
+                        fh.write(audio)
                 else:
                     audio = await _tts_gemini(text, vc, mdl)
                     model = mdl
