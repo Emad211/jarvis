@@ -94,8 +94,9 @@ def bridge(intent: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         payload["intent"] = "key"
         payload["args"] = {"name": "notifications"}
     if intent == "clipboard":
-        # the bridge has two separate actions; the intent here is one with optional text
-        payload["intent"] = "clipboard_set" if str(args.get("text") or "") else "clipboard_get"
+        # reading is only legal for the *focused* app on Android 10+, so a read goes through an
+        # invisible activity that takes focus for one frame (Clip.java). A write stays direct.
+        payload["intent"] = "clipboard_set" if str(args.get("text") or "") else "clipboard_focus"
     if intent == "screenshot":
         # the PNG lands in the app's private cache, so ask for the bytes inline and write them
         # where the rest of the pipeline expects them (~/shots/jv_*.png)

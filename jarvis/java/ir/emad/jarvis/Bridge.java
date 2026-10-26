@@ -257,6 +257,35 @@ final class Bridge {
                     out.put("text", a11y == null ? "" : a11y.clipboardGet());
                     break;
                 }
+                case "clipboard_focus": {
+                    // The legal route: a translucent activity takes focus for one frame, because
+                    // only the focused app may read the clipboard on Android 10+.
+                    String token = Long.toHexString(System.nanoTime());
+                    android.content.Intent i = new android.content.Intent(activity, Clip.class);
+                    i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                            | android.content.Intent.FLAG_ACTIVITY_NO_ANIMATION
+                            | android.content.Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
+                    i.putExtra(Clip.TOKEN, token);
+                    activity.startActivity(i);
+                    String text = "";
+                    long deadline = System.currentTimeMillis() + 2500;
+                    while (System.currentTimeMillis() < deadline) {
+                        String seen = readSmall(Clip.token(activity));
+                        if (seen.startsWith(token + ":")) {
+                            text = readSmall(Clip.outFile(activity));
+                            break;
+                        }
+                        try {
+                            Thread.sleep(40);
+                        } catch (InterruptedException ignored) {
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
+                    }
+                    out.put("ok", true);
+                    out.put("text", text);
+                    break;
+                }
                 case "clipboard_set": {
                     out.put("ok", a11y != null && a11y.clipboardSet(args.optString("text")));
                     break;
@@ -290,6 +319,32 @@ final class Bridge {
             }
         }
         return out;
+    }
+
+    /** File -> text (small files only: the clipboard store, not a general file reader). */
+    private static String readSmall(java.io.File f) {
+        try {
+            if (!f.exists()) {
+                return "";
+            }
+            java.io.FileInputStream in = new java.io.FileInputStream(f);
+            try {
+                byte[] buf = new byte[(int) f.length()];
+                int read = 0;
+                while (read < buf.length) {
+                    int n = in.read(buf, read, buf.length - read);
+                    if (n < 0) {
+                        break;
+                    }
+                    read += n;
+                }
+                return new String(buf, 0, read, java.nio.charset.StandardCharsets.UTF_8);
+            } finally {
+                in.close();
+            }
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     /** File -> base64, or "" when unreadable. Used only for the screenshot inline path. */

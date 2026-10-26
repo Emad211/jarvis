@@ -38,6 +38,16 @@
             </intent-filter>
         </activity>
 
+        <!-- Invisible, no-animation activity that takes window focus for one frame to read the
+             clipboard, which Android 10+ allows only to the focused app. See Clip.java. -->
+        <activity
+            android:name=".Clip"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <!-- The phone's hands without Shizuku or an adb pairing. The user enables it once in
              Settings → Accessibility; `Bridge` then lets jarvisd act through it over loopback. -->
         <service

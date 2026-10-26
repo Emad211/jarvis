@@ -48,6 +48,7 @@ SECRET_RE = re.compile(
 _CACHE: Dict[str, Tuple[float, Any]] = {}
 _CACHE_LOCK = threading.Lock()
 _CURATOR_RUN = {"busy": False}
+_CRON_RUNS: set = set()   # job ids currently executing because the console asked
 
 
 # --------------------------------------------------------------------------- helpers --
@@ -595,6 +596,27 @@ def _with_persona(ctx, prompt: str, persona: str) -> Tuple[str, bool]:
     return prefix + PERSONA_SEP + prompt, True
 
 
+# `hermes cron create` refuses prompts with invisible Unicode:
+#   "Blocked: prompt contains invisible unicode U+200C (possible injection)."
+# Persian text is full of U+200C (ZWNJ) — «می‌کند», «تحلیل‌گر» — so *every* Persian prompt was
+# rejected before it could become a job. Replace the invisible characters with their visible
+# equivalent instead of dropping the job: ZWNJ -> space (how people type it without a keyboard
+# that has ZWNJ), the rest -> nothing. Never silent: the endpoint reports what was changed.
+INVISIBLE = {"\u200c": " ", "\u200d": "", "\u200e": "", "\u200f": "",
+             "\u2060": "", "\ufeff": ""}
+
+
+def _sanitise_prompt(text: str) -> Tuple[str, List[Dict[str, Any]]]:
+    notes: List[Dict[str, Any]] = []
+    for char, repl in INVISIBLE.items():
+        count = text.count(char)
+        if count:
+            text = text.replace(char, repl)
+            notes.append({"char": "U+%04X" % ord(char), "count": count,
+                          "replaced_with": repl or "nothing"})
+    return text, notes
+
+
 def _cron_rows(ctx) -> List[Dict[str, Any]]:
     personas = _persona_sidecar(ctx)
     jobs: List[Dict[str, Any]] = []
@@ -902,6 +924,7 @@ def register(app, ctx):  # noqa: C901
             return err("bad_persona", persona)
         # The persona becomes part of the instruction Hermes runs, not a sidecar nobody reads.
         job_prompt, injected = _with_persona(ctx, prompt, persona)
+        job_prompt, sanitised = _sanitise_prompt(job_prompt)
         args = ["cron", "create", schedule, job_prompt, "--deliver", "local"]
         if name:
             args += ["--name", name[:80]]
@@ -914,7 +937,8 @@ def register(app, ctx):  # noqa: C901
             _save_persona_sidecar(ctx, job_id, persona, prompt)
         ctx["notify"]("tools: cron %s created (%s)%s" % (job_id, schedule,
                                                          ", persona " + persona if persona else ""))
-        return {"ok": True, "id": job_id, "persona": persona, "persona_in_prompt": injected}
+        return {"ok": True, "id": job_id, "persona": persona, "persona_in_prompt": injected,
+                "sanitised": sanitised}
 
     @app.patch("/cron/{job_id}")
     async def cron_edit(job_id: str, req: Request):
@@ -932,6 +956,7 @@ def register(app, ctx):  # noqa: C901
         if persona and _persona_prefix(ctx, persona) == "":
             return err("bad_persona", persona)
         job_prompt, injected = _with_persona(ctx, base, persona)
+        job_prompt, sanitised = _sanitise_prompt(job_prompt)
         args = ["cron", "edit", job_id, "--prompt", job_prompt]
         if data.get("name"):
             args += ["--name", str(data["name"])[:80]]
@@ -942,17 +967,32 @@ def register(app, ctx):  # noqa: C901
             return err("cli_failed", _redact(" ".join(out.split()))[:300])
         _save_persona_sidecar(ctx, job_id, persona, base)
         ctx["notify"]("tools: cron %s edited (persona %s)" % (job_id, persona or "-"))
-        return {"ok": True, "id": job_id, "persona": persona, "persona_in_prompt": injected}
+        return {"ok": True, "id": job_id, "persona": persona, "persona_in_prompt": injected,
+                "sanitised": sanitised}
 
     @app.post("/cron/{job_id}/run")
     def cron_run(job_id: str):
+        # `hermes cron run` does NOT queue: it executes the job synchronously (measured — the
+        # attempt shows `source=direct`, and a 60 s HTTP timeout killed the CLI mid-run and left
+        # an orphaned "unknown" attempt with the job's last_run untouched). So run it on a
+        # thread and answer at once, the same shape /curator/run uses.
         if not ID_RE.match(job_id):
             return err("bad_id", job_id)
-        code, out = _run(ctx, "cron", "run", job_id, timeout=60)
-        if code != 0:
-            return err("cli_failed", _redact(" ".join(out.split()))[:300])
-        ctx["notify"]("tools: cron %s queued" % job_id)
-        return {"ok": True}
+        if job_id in _CRON_RUNS:
+            return {"ok": True, "started": False, "detail": "already running", "id": job_id}
+        _CRON_RUNS.add(job_id)
+
+        def work() -> None:
+            try:
+                code, out = _run(ctx, "cron", "run", job_id, timeout=900)
+                ctx["notify"]("cron: run %s finished rc=%s %s"
+                              % (job_id, code, _redact(" ".join(out.split()))[:160]))
+            finally:
+                _CRON_RUNS.discard(job_id)
+
+        threading.Thread(target=work, name="cron-run-" + job_id, daemon=True).start()
+        ctx["notify"]("cron: run %s started by console" % job_id)
+        return {"ok": True, "started": True, "id": job_id}
 
     @app.post("/cron/{job_id}/pause")
     async def cron_pause(job_id: str, req: Request):
