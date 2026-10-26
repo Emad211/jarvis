@@ -362,8 +362,65 @@ def _quality(page: Dict[str, Any]) -> float:
     return round(score, 2)
 
 
-def _extract(ctx, urls: List[str], run: Optional["Run"] = None) -> Dict[str, Dict[str, Any]]:
-    """Fetch pages: Hermes' extractor in one batch, then per URL, then a plain GET.
+CACHE_KEEP = 60          # pages kept in the shared page cache
+PAGE_TTL_FRESH = 1800    # a new run may reuse a page this old (prices move)
+PAGE_TTL_FOLLOWUP = 86400  # a follow-up is a conversation: reuse the run's own pages
+_CACHE_LOCK = threading.Lock()
+
+
+def _cache_path(ctx) -> str:
+    return os.path.join(_dir(ctx), "_pages.json")
+
+
+def _cache_load(ctx) -> Dict[str, Dict[str, Any]]:
+    try:
+        with open(_cache_path(ctx), encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _cache_get(ctx, url: str, max_age: float) -> Optional[Dict[str, Any]]:
+    with _CACHE_LOCK:
+        row = _cache_load(ctx).get(_norm_url(url))
+    if not isinstance(row, dict) or not row.get("content"):
+        return None
+    if max_age > 0 and (_now() - float(row.get("ts") or 0)) > max_age:
+        return None
+    return {"url": row.get("url") or url, "title": row.get("title") or "",
+            "content": row["content"], "lane": "cache", "links": int(row.get("links") or 0)}
+
+
+def _cache_put(ctx, page: Dict[str, Any]) -> None:
+    if not page.get("content"):
+        return
+    with _CACHE_LOCK:
+        data = _cache_load(ctx)
+        data[_norm_url(page["url"])] = {"url": page["url"], "title": page.get("title") or "",
+                                        "content": page["content"],
+                                        "links": page.get("links") or 0, "ts": _now()}
+        if len(data) > CACHE_KEEP:
+            keep = sorted(data.items(), key=lambda kv: float((kv[1] or {}).get("ts") or 0),
+                          reverse=True)[:CACHE_KEEP]
+            data = dict(keep)
+        try:
+            os.makedirs(_dir(ctx), exist_ok=True)
+            tmp = _cache_path(ctx) + ".tmp"
+            with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+                json.dump(data, fh, ensure_ascii=False)
+            os.replace(tmp, _cache_path(ctx))
+        except OSError:
+            pass
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _extract(ctx, urls: List[str], run: Optional["Run"] = None,
+             max_age: float = PAGE_TTL_FRESH) -> Dict[str, Dict[str, Any]]:
+    """Fetch pages: page cache, Hermes' extractor in one batch, per URL, then a GET.
 
     A single bad URL used to take the whole batch down, which is how four pages ended up
     fetched by the weakest lane. Each stage now only handles what earlier stages missed.
@@ -372,6 +429,12 @@ def _extract(ctx, urls: List[str], run: Optional["Run"] = None) -> Dict[str, Dic
 
     out: Dict[str, Dict[str, Any]] = {}
     pending = list(dict.fromkeys(urls))
+
+    for url in list(pending):
+        hit = _cache_get(ctx, url, max_age)
+        if hit:
+            out[_norm_url(url)] = hit
+    pending = [u for u in pending if _norm_url(u) not in out]
 
     def take(rows) -> None:
         for row in rows or []:
@@ -385,8 +448,11 @@ def _extract(ctx, urls: List[str], run: Optional["Run"] = None) -> Dict[str, Dic
             key = _norm_url(url)
             if key not in out:
                 out[key] = page
+            _cache_put(ctx, page)
 
     if pending:
+        if run is not None:
+            run.ensure_live()
         try:
             batch = pending[:8]
             raw = asyncio.run(_web_tools().web_extract_tool(batch,
@@ -398,6 +464,8 @@ def _extract(ctx, urls: List[str], run: Optional["Run"] = None) -> Dict[str, Dic
                 run.emit("state", {"state": run.state,
                                    "detail": "batch extract failed: " + _trim(str(exc), 120)})
     if pending:
+        if run is not None:
+            run.ensure_live()
         # A batch can lose one URL to a provider 403; retry the missing ones *in
         # parallel* (measured: 4 pages 3.7 s wall instead of ~14 s serially).
         import concurrent.futures as cf
@@ -416,9 +484,12 @@ def _extract(ctx, urls: List[str], run: Optional["Run"] = None) -> Dict[str, Dic
                 take(rows)
         pending = [u for u in pending if _norm_url(u) not in out]
     for url in pending:
+        if run is not None and run.cancelled.is_set():
+            break
         page = _plain_fetch(url)
         if page:
             out[_norm_url(url)] = page
+            _cache_put(ctx, page)
     return out
 
 
@@ -483,17 +554,38 @@ GAP_PROMPT = (
     "{{\"gaps\":[\"query\"]}}"
 )
 
+FOLLOWUP_PLAN = (
+    "A research run already answered this question: {parent_q}\n"
+    "It already read these sources:\n{toc}\n"
+    "The user's follow-up question is: {question}\n"
+    "Decide whether the follow-up can be answered from those sources alone. If it "
+    "genuinely needs fresh facts (a new number, a different subject, something after "
+    "those pages), give at most 2 English search queries; otherwise give none.\n"
+    "JSON only: {{\"need_search\":true|false,\"queries\":[\"…\"],\"why\":\"short\"}}"
+)
+
+FOLLOWUP_CONTEXT = (
+    "این یک پرسش پیگیرانه از یک پژوهش قبلی است. خلاصهٔ گزارش قبلی:\n{prev}\n"
+    "فقط به پرسش تازه پاسخ بده و همان قواعد ارجاع را رعایت کن؛ ارجاع به منابعی که "
+    "در ادامه آمده‌اند مجاز است."
+)
+
 
 # ------------------------------------------------------------------------------- run --
 class Run:
     """One research run: its step log, its event stream, its persisted result."""
 
-    def __init__(self, ctx, question: str, depth: int, persona: str):
+    def __init__(self, ctx, question: str, depth: int, persona: str,
+                 parent: str = "", parent_urls: Optional[List[str]] = None,
+                 parent_report: str = ""):
         self.ctx = ctx
         self.id = uuid.uuid4().hex[:12]
         self.question = question
         self.depth = depth
         self.persona = persona
+        self.parent = parent
+        self.parent_urls = list(parent_urls or [])
+        self.parent_report = parent_report
         self.created = float(ctx["now"]())
         self.state = "queued"
         self.steps: List[Dict[str, Any]] = []
@@ -512,6 +604,8 @@ class Run:
         self.verification: Dict[str, Any] = {}
         self.timing: Dict[str, Any] = {}
         self.subquestions: List[Dict[str, str]] = []
+        self.decision: Dict[str, Any] = {}
+        self.rejected: List[Dict[str, Any]] = []
         self.ended = 0.0
 
     # events ---------------------------------------------------------------------
@@ -564,12 +658,14 @@ class Run:
     def snapshot(self, full: bool = True) -> Dict[str, Any]:
         data = {"id": self.id, "question": self.question, "depth": self.depth,
                 "persona": self.persona, "created": self.created, "state": self.state,
+                "parent": self.parent,
                 "steps": self.steps, "ms": int(((self.ended or float(self.ctx["now"]()))
                                                 - self.created) * 1000),
                 "error": self.error, "model_calls": self.model_calls,
                 "searches": self.searches, "timing": self.timing,
                 "verification": self.verification, "attempts": self.attempts,
-                "lanes": self.lanes, "subquestions": self.subquestions}
+                "lanes": self.lanes, "subquestions": self.subquestions,
+                "decision": self.decision, "rejected": self.rejected}
         if full:
             data["report"] = self.report
             data["sources"] = self.sources
@@ -721,14 +817,17 @@ def _pick_urls(rows: List[Dict[str, Any]], limit: int) -> List[str]:
 def _evidence(run: Run, picked: List[str], pages: Dict[str, Dict[str, Any]]) -> str:
     """The numbered page block the synthesis model is allowed to cite."""
     run.sources = []
+    rejected: List[Dict[str, Any]] = []
     blocks = []
     used = 0
     for index, url in enumerate(picked, start=1):
         page = pages.get(_norm_url(url))
         if not page:
+            rejected.append({"url": url, "quality": 0.0, "why": "not fetched"})
             continue
         score = _quality(page)
         if score < 0.45:            # a menu, not evidence
+            rejected.append({"url": page["url"], "quality": score, "why": "looks like a menu"})
             continue
         content = _trim(page["content"], PAGE_CHARS)
         if used + len(content) > TOTAL_CHARS:
@@ -741,6 +840,7 @@ def _evidence(run: Run, picked: List[str], pages: Dict[str, Dict[str, Any]]) -> 
         run.sources.append({"n": index, "url": page["url"], "title": title,
                             "chars": len(content), "lane": page.get("lane", ""),
                             "quality": score})
+    run.rejected = rejected
     return "\n".join(blocks)
 
 
@@ -858,13 +958,127 @@ def _evidence_extra(run: Run, pages: Dict[str, Dict[str, Any]]) -> str:
     return "\n".join(blocks)
 
 
+def _execute_followup(ctx, run: Run) -> None:
+    """Reuse the parent run's sources; search only if the follow-up truly needs it.
+
+    Two model calls at most: one to decide whether fresh facts are required, one to write
+    the answer. Pages come from the shared page cache first, so a follow-up is usually
+    seconds, not a new research run.
+    """
+    deadline = run.created + RUN_DEADLINE[run.depth]
+    try:
+        run.set_state("reading")
+        step = run.step_start("read", "بازخوانی %d منبع قبلی" % len(run.parent_urls))
+        pages = _extract(ctx, run.parent_urls, run, max_age=PAGE_TTL_FOLLOWUP)
+        run.step_end(step, "ok" if pages else "empty",
+                     "%d/%d pages" % (len(pages), len(run.parent_urls)))
+        if not pages:
+            raise RuntimeError("the sources of the earlier run are no longer readable")
+        run.ensure_live()
+
+        run.set_state("planning")
+        step = run.step_start("plan", "آیا جست‌وجوی تازه لازم است؟")
+        toc = "\n".join("- [%d] %s" % (i, _trim((p or {}).get("title") or u, 100))
+                        for i, (u, p) in enumerate(pages.items(), start=1))
+        queries: List[str] = []
+        try:
+            answer = _chat(ctx, run, "followup-plan", [
+                {"role": "system", "content": "JSON only."},
+                {"role": "user", "content": FOLLOWUP_PLAN.format(
+                    parent_q=run.parent_report[:200] or run.question, toc=toc,
+                    question=run.question)},
+            ], max_tokens=300)
+            data = _parse_json(answer) or {}
+            queries = [str(q) for q in (data.get("queries") or []) if isinstance(q, str)][:2]
+            run.decision = {"need_search": bool(data.get("need_search")), "queries": queries,
+                            "why": _trim(str(data.get("why") or ""), 160)}
+            run.step_end(step, "ok", "need_search=%s" % bool(queries))
+        except Exception as exc:  # noqa: BLE001  (a follow-up must not die on the planner)
+            run.step_end(step, "warn", str(exc))
+            run.decision = {"need_search": False, "queries": [], "why": "planner failed"}
+
+        if queries and not run.cancelled.is_set():
+            run.set_state("searching")
+            extra: List[str] = []
+            for query in queries:
+                hits, _err = _search(run.lanes, query, 2)
+                run.searches += 1
+                for hit in hits[:1]:
+                    if _norm_url(hit["url"]) not in pages:
+                        extra.append(hit["url"])
+            if extra:
+                fresh = _extract(ctx, extra[:2], run)
+                pages.update(fresh)
+        run.ensure_live()
+
+        run.set_state("reading")
+        evidence = _evidence(run, list(pages.keys()), pages)
+        if not evidence:
+            raise RuntimeError("no usable page from the earlier run")
+        run.save(False)
+
+        run.set_state("synthesising")
+        step = run.step_start("synthesise", "نوشتن پاسخ پیگیرانه")
+        messages = [
+            {"role": "system", "content": "You are a meticulous Persian research writer. "
+                                          "A claim without the source URL next to it is a bug."},
+            {"role": "user", "content": FOLLOWUP_CONTEXT.format(
+                prev=_trim(run.parent_report, 1200)) + "\n\n" + _report_prompt(ctx, run, evidence)
+                + "\n\nFollow-up question: " + run.question},
+        ]
+
+        def delta(piece: str) -> None:
+            run.emit("answer.delta", {"text": _redact(piece)})
+
+        try:
+            run.report = _chat(ctx, run, "followup", messages, max_tokens=1400,
+                               stream_to=delta).strip()
+        except Exception:  # noqa: BLE001  (provider without streaming)
+            run.report = _chat(ctx, run, "followup-plain", messages, max_tokens=1400).strip()
+        run.step_end(step, "ok" if run.report else "empty", "%d chars" % len(run.report))
+        run.ensure_live()
+
+        _verify(run)
+        run.ended = float(ctx["now"]())
+        run.set_state("done" if run.report else "error")
+        run.emit("done", {"id": run.id, "ms": int((run.ended - run.created) * 1000),
+                          "sources": len(run.sources), "state": run.state,
+                          "parent": run.parent})
+        ctx["notify"]("research: follow-up %s on %s done in %ss (%d searches)"
+                      % (run.id, run.parent, int(run.ended - run.created), run.searches))
+    except Cancelled:
+        run.ended = float(ctx["now"]())
+        run.error = "cancelled by the console"
+        run.state = "cancelled"
+        run.emit("error", {"detail": run.error, "state": "cancelled"})
+        run.emit("done", {"id": run.id, "state": "cancelled",
+                          "ms": int((run.ended - run.created) * 1000),
+                          "sources": len(run.sources)})
+        ctx["notify"]("research: follow-up %s cancelled" % run.id)
+    except Exception as exc:  # noqa: BLE001
+        run.ended = float(ctx["now"]())
+        run.error = _redact(_trim(str(exc), 400))
+        run.state = "cancelled" if run.cancelled.is_set() else "error"
+        run.emit("error", {"detail": run.error, "state": run.state})
+        run.emit("done", {"id": run.id, "state": run.state,
+                          "ms": int((run.ended - run.created) * 1000),
+                          "sources": len(run.sources)})
+        ctx["notify"]("research: follow-up %s %s: %s" % (run.id, run.state, run.error))
+    finally:
+        run.save(True)
+
+
 def _execute(ctx, run: Run) -> None:
+    if run.parent:
+        _execute_followup(ctx, run)
+        return
     deadline = run.created + RUN_DEADLINE[run.depth]
 
     def check_deadline(stage: str) -> None:
         if float(ctx["now"]()) > deadline:
             raise RuntimeError("deadline of %ds reached during %s"
                                % (RUN_DEADLINE[run.depth], stage))
+        run.ensure_live()
 
     try:
         run.set_state("planning")
@@ -872,6 +1086,9 @@ def _execute(ctx, run: Run) -> None:
         try:
             run.subquestions = _plan(ctx, run)
             run.step_end(step, "ok", "%d sub-questions" % len(run.subquestions))
+        except Cancelled:
+            run.step_end(step, "cancelled", "cancelled")
+            raise
         except Exception as exc:  # noqa: BLE001
             run.step_end(step, "error", str(exc))
             raise
@@ -880,6 +1097,7 @@ def _execute(ctx, run: Run) -> None:
 
         run.set_state("searching")
         rows = _search_all(ctx, run, run.subquestions)
+        run.ensure_live()
         picked = _pick_urls(rows, DEPTHS[run.depth]["max_pages"])
         if not picked:
             raise RuntimeError("no search result survived (searched %d sub-questions)"
@@ -890,14 +1108,16 @@ def _execute(ctx, run: Run) -> None:
         run.set_state("reading")
         step = run.step_start("read", "خواندن %d صفحه" % len(picked))
         pages = _extract(ctx, picked, run)
+        run.ensure_live()
         evidence = _evidence(run, picked, pages)
-        if len(run.sources) < 2:
+        if len(run.sources) < 3:
             # Menus and 403s can eat the whole budget; spend one more batch on the
-            # next-ranked hits before giving up on having evidence at all.
+            # next-ranked hits before settling for two pages of evidence.
             spare = [u for u in _pick_urls(rows, DEPTHS[run.depth]["max_pages"] + 4)
                      if _norm_url(u) not in pages][:4]
             if spare:
                 pages.update(_extract(ctx, spare, run))
+                run.ensure_live()
                 evidence = _evidence(run, picked + spare, pages)
         run.step_end(step, "ok" if evidence else "empty",
                      "%d usable page(s) of %d fetched" % (len(run.sources), len(pages)))
@@ -909,11 +1129,13 @@ def _execute(ctx, run: Run) -> None:
         if run.depth >= 3 and run.model_calls < DEPTHS[3]["max_calls"]:
             run.set_state("searching")
             extra = _gap_pass(ctx, run, pages)
+            run.ensure_live()
             if extra:
                 evidence = evidence + "\n" + extra
 
         run.set_state("synthesising")
         _synthesise(ctx, run, evidence)
+        run.ensure_live()
 
         _verify(run)
         run.ended = float(ctx["now"]())
@@ -923,6 +1145,14 @@ def _execute(ctx, run: Run) -> None:
         ctx["notify"]("research: %s done in %ss (%d sources, %d searches, %d calls)"
                       % (run.id, int(run.ended - run.created), len(run.sources),
                          run.searches, run.model_calls))
+    except Cancelled:
+        run.ended = float(ctx["now"]())
+        run.error = "cancelled by the console"
+        run.state = "cancelled"
+        run.emit("error", {"detail": run.error, "state": "cancelled"})
+        run.emit("done", {"id": run.id, "ms": int((run.ended - run.created) * 1000),
+                          "sources": len(run.sources), "state": "cancelled"})
+        ctx["notify"]("research: %s cancelled" % run.id)
     except Exception as exc:  # noqa: BLE001
         run.ended = float(ctx["now"]())
         run.error = _redact(_trim(str(exc), 400))
@@ -963,6 +1193,10 @@ def _get(ctx, rid: str) -> Optional[Run]:
     run.attempts = data.get("attempts") or []
     run.lanes = data.get("lanes") or []
     run.subquestions = data.get("subquestions") or []
+    run.decision = data.get("decision") or {}
+    run.parent = str(data.get("parent") or "")
+    run.parent_urls = [str(s.get("url")) for s in run.sources if isinstance(s, dict)]
+    run.parent_report = run.report
     run.model_calls = int(data.get("model_calls") or 0)
     run.searches = int(data.get("searches") or 0)
     run.ended = run.created + (float(data.get("ms") or 0) / 1000.0)
@@ -1001,8 +1235,12 @@ def _recent(ctx, limit: int = 20) -> List[Dict[str, Any]]:
     return ordered[: max(1, min(limit, 100))]
 
 
-def start_research(ctx, question: str, depth: int = 2, persona: str = "") -> Run:
-    run = Run(ctx, question, depth, persona)
+def start_research(ctx, question: str, depth: int = 2, persona: str = "",
+                   parent: "Optional[Run]" = None) -> Run:
+    run = Run(ctx, question, depth, persona,
+              parent=parent.id if parent else "",
+              parent_urls=[str(s.get("url")) for s in (parent.sources if parent else [])],
+              parent_report=parent.report if parent else "")
     with _LOCK:
         _RUNS[run.id] = run
     run.save(False)
@@ -1046,6 +1284,31 @@ def register(app, ctx):  # noqa: C901
             return err("internal", _redact(str(exc)), 500)
         ctx["notify"]("research: %s queued (depth %d)" % (run.id, depth))
         return {"ok": True, "id": run.id}
+
+    @app.post("/research/{rid}/followup")
+    async def research_followup(rid: str, req: Request):
+        """Ask a follow-up of a finished run: its sources are reused, not re-researched."""
+        if not re.match(r"^[0-9a-f]{6,32}$", rid):
+            return err("bad_id", rid)
+        parent = _get(ctx, rid)
+        if parent is None:
+            return err("not_found", rid, 404)
+        if parent.state != "done" or not parent.sources:
+            return err("not_ready", "run %s is %s with %d sources"
+                       % (rid, parent.state, len(parent.sources)), 409)
+        data = await body(req)
+        question = _trim(str(data.get("question") or ""), 2000)
+        if len(question) < 3:
+            return err("bad_question", "question is required")
+        persona = str(data.get("persona") or parent.persona)
+        try:
+            run = start_research(ctx, question, min(3, max(1, parent.depth)), persona,
+                                 parent=parent)
+        except Exception as exc:  # noqa: BLE001
+            return err("internal", _redact(str(exc)), 500)
+        ctx["notify"]("research: follow-up %s on %s queued" % (run.id, parent.id))
+        return {"ok": True, "id": run.id, "parent": parent.id,
+                "reused_sources": len(parent.sources)}
 
     @app.get("/research/{rid}")
     def research_get(rid: str):
@@ -1108,15 +1371,22 @@ def register(app, ctx):  # noqa: C901
         run = _get(ctx, rid)
         if run is None:
             return err("not_found", rid, 404)
+        was_live = run.state not in ("done", "error", "cancelled")
         run.cancelled.set()
-        if run.state not in ("done", "error", "cancelled"):
+        if was_live:
             run.set_state("cancelled")
-        run.emit("error", {"detail": "cancelled by the console", "state": "cancelled"})
-        run.emit("done", {"id": run.id, "state": "cancelled",
-                          "ms": int((float(ctx["now"]()) - run.created) * 1000),
-                          "sources": len(run.sources)})
-        ctx["notify"]("research: %s cancelled" % run.id)
-        return {"ok": True}
+            for step in run.steps:            # leave no step spinning for ever
+                if step.get("state") == "running":
+                    run.step_end(step, "cancelled", "cancelled")
+            run.emit("error", {"detail": "cancelled by the console", "state": "cancelled"})
+            run.emit("done", {"id": run.id, "state": "cancelled",
+                              "ms": int((float(ctx["now"]()) - run.created) * 1000),
+                              "sources": len(run.sources)})
+            run.ended = float(ctx["now"]())
+            run.error = "cancelled by the console"
+            run.save(True)
+            ctx["notify"]("research: %s cancelled" % run.id)
+        return {"ok": True, "state": run.state, "cancelled": True, "was_live": was_live}
 
     @app.get("/research")
     def research_recent(limit: int = 20):

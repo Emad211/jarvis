@@ -169,6 +169,8 @@ class Session:
         self.persona = ""
         # Which toolset preset this session runs on ("fast" | "smart" | "full" | a csv list).
         self.toolsets = ""
+        # Which bot (Hermes profile) owns this conversation; "" = the default bot.
+        self.bot = ""
         self.messages: List[Dict[str, Any]] = []
         self.asks: Dict[str, Dict[str, Any]] = {}
         self.turn_seq = 0
@@ -202,7 +204,7 @@ class Session:
             data = {"id": self.id, "title": self.title, "created": self.created,
                     "updated": self.updated, "model": self.model,
                     "reasoning": self.reasoning, "turns": self.turn_seq,
-                    "persona": self.persona, "toolsets": self.toolsets,
+                    "persona": self.persona, "toolsets": self.toolsets, "bot": self.bot,
                     "messages": self.messages}
             tmp = self.path() + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
@@ -225,6 +227,7 @@ class Session:
         s.reasoning = str(data.get("reasoning") or DEFAULT_REASONING)
         s.persona = str(data.get("persona") or "")
         s.toolsets = str(data.get("toolsets") or "")
+        s.bot = str(data.get("bot") or "")
         s.turn_seq = int(data.get("turns") or 0)
         s.messages = data.get("messages") or []
         return s
@@ -360,6 +363,122 @@ def build_agent(session: Session, model: str, toolsets: List[str], reasoning: st
     return agent, on_approval
 
 
+def _drain_team_results() -> int:
+    """Move finished background sub-agents into the conversation.
+
+    `delegate_task` is asynchronous: the turn that launched it ends with "waiting for them" and
+    the answer lands later on Hermes' completion queue. The gateway used to drain that queue —
+    with the gateway deleted, nothing did, so every delegated result was silently dropped.
+    `drain_notifications(owns_event=…)` is the supported consumer: it only takes events this
+    daemon can prove it owns and re-queues the rest for theirs.
+    """
+    moved = 0
+    owners: List[str] = []
+
+    def _owner(evt: Dict[str, Any]) -> str:
+        # Measured on the phone: `origin_ui_session_id` / `origin_session_id` come through
+        # empty for this agent; the routing key that actually carries our session id is
+        # `session_key`. Check all three so the parser survives an upstream change.
+        for key in ("origin_ui_session_id", "origin_session_id", "session_key"):
+            val = str(evt.get(key) or "")
+            if val and HUB.get(val) is not None:
+                return val
+        return ""
+
+    def _answer_text(evt: Dict[str, Any], formatted: str) -> str:
+        for key in ("summary", "answer", "text", "output", "result"):
+            val = evt.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+            if isinstance(val, dict):
+                for sub in ("summary", "answer", "text", "output"):
+                    inner = val.get(sub)
+                    if isinstance(inner, str) and inner.strip():
+                        return inner.strip()
+        return str(formatted or "").strip()
+
+    def owns(evt) -> bool:
+        return isinstance(evt, dict) and bool(_owner(evt))
+
+    try:
+        from tools.process_registry import process_registry
+        pairs = process_registry.drain_notifications(owns_event=owns) or []
+    except Exception as exc:  # noqa: BLE001
+        print("jarvisd: team drain failed: %s" % exc, flush=True)
+        return 0
+
+    for evt, formatted in pairs:
+        if not isinstance(evt, dict):
+            continue
+        owner = _owner(evt)
+        target = HUB.get(owner)
+        if target is None:
+            continue
+        summary = _answer_text(evt, formatted)
+        goal = str(evt.get("goal") or "").strip()
+        if not summary:
+            continue
+        text = ("**زیرعامل: %s**\n\n%s" % (goal, summary)) if goal else summary
+        target.messages.append({"role": "assistant", "text": text})
+        target.updated = now()
+        target.turn_seq += 1
+        target.save()
+        target.emit("team.result", {"goal": goal, "status": str(evt.get("status") or ""),
+                                    "summary": summary[:4000],
+                                    "model": str(evt.get("model") or ""),
+                                    "ms": int(float(evt.get("duration_seconds") or 0) * 1000)})
+        print("jarvisd: team result -> %s (%s)" % (owner, str(evt.get("delegation_id") or "")[:8]),
+              flush=True)
+        moved += 1
+    if moved:
+        return moved
+
+    # After a daemon restart the live queue is empty; durable rows still hold the answers.
+    try:
+        from tools import async_delegation as delegation
+        import queue as _queue
+        box: "_queue.Queue" = _queue.Queue()
+        delegation.restore_undelivered_completions(box)
+    except Exception:  # noqa: BLE001
+        return 0
+    while True:
+        try:
+            evt = box.get_nowait()
+        except _queue.Empty:
+            break
+        if not isinstance(evt, dict) or evt.get("type") != "async_delegation":
+            continue
+        owner = str(evt.get("origin_ui_session_id") or evt.get("origin_session_id") or "")
+        target = HUB.get(owner) if owner else None
+        summary = str(evt.get("summary") or "").strip()
+        if target is None or not summary:
+            continue
+        goal = str(evt.get("goal") or "").strip()
+        target.messages.append({"role": "assistant",
+                                "text": ("**زیرعامل: %s**\n\n%s" % (goal, summary)) if goal
+                                        else summary})
+        target.updated = now()
+        target.save()
+        target.emit("team.result", {"goal": goal, "status": str(evt.get("status") or ""),
+                                    "summary": summary[:4000], "ms": 0})
+        try:
+            delegation.mark_completion_delivered(str(evt.get("delegation_id") or ""))
+        except Exception:  # noqa: BLE001
+            pass
+        moved += 1
+    return moved
+
+
+def _team_watch() -> None:
+    """Poll for finished sub-agents even when no turn is running."""
+    while True:
+        try:
+            _drain_team_results()
+        except Exception as exc:  # noqa: BLE001
+            print("jarvisd: team watch: %s" % exc, flush=True)
+        time.sleep(5)
+
+
 def _fallback_chain() -> Optional[List[Dict[str, str]]]:
     """The configured fallback providers, as AIAgent.fallback_model expects them.
 
@@ -428,6 +547,26 @@ def _progress(session: Session, kind: str, name=None, preview=None, args=None,
 
 
 def run_turn(session: Session, text: str) -> None:
+    """Run one turn inside the session's bot scope.
+
+    A bot is a Hermes *profile*: its own home, SOUL, memories, skills, cron and state.db. The
+    isolation lives in a ContextVar, and ContextVars do not cross threads, so the scope has to
+    be entered **inside** this worker thread — that is the whole reason this is a wrapper rather
+    than a parameter passed to AIAgent.
+    """
+    try:
+        import jarvisd_bots
+        scope = jarvisd_bots.turn_scope(CTX, session)
+    except Exception:  # noqa: BLE001
+        scope = None
+    if scope is None:
+        _run_turn_inner(session, text)
+        return
+    with scope:
+        _run_turn_inner(session, text)
+
+
+def _run_turn_inner(session: Session, text: str) -> None:
     """Worker-thread body: one user turn through the warm agent."""
     from tools.terminal_tool import set_approval_callback
 
@@ -550,7 +689,7 @@ def _set_persona(sid: str, pid: str) -> bool:
     s.save()
     return True
 for _mod_name in ("jarvisd_personas", "jarvisd_tools", "jarvisd_ops", "jarvisd_voice",
-                  "jarvisd_research"):
+                  "jarvisd_research", "jarvisd_bots"):
     try:
         _mod = __import__(_mod_name)
         _mod.register(app, CTX)
@@ -1462,6 +1601,7 @@ def main() -> None:
     import uvicorn
     _load_probe()
     threading.Thread(target=boot, name="boot", daemon=True).start()
+    threading.Thread(target=_team_watch, name="team", daemon=True).start()
     print("jarvisd %s on http://127.0.0.1:%d" % (VERSION, PORT), flush=True)
     uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning", access_log=False)
 

@@ -509,6 +509,29 @@ public class MainActivity extends Activity {
             case "ask":
                 showAsk(data);
                 break;
+            case "team.result": {
+                // A background sub-agent finished. It can land minutes after the turn that
+                // launched it, so it arrives as its own transcript entry, not as a delta.
+                String goal = data.optString("goal", "");
+                String summary = data.optString("summary", "");
+                if (summary.isEmpty()) {
+                    break;
+                }
+                if (streaming != null) {
+                    streaming.streaming = false;
+                    streaming = null;
+                }
+                Msg t = new Msg(Msg.ASSISTANT);
+                t.text.append(goal.isEmpty() ? summary : "**" + goal + "**\n\n" + summary);
+                t.model = data.optString("model", "");
+                t.totalMs = data.optInt("ms", 0);
+                messages.add(t);
+                busy = false;
+                sendIcon.set(Icon.SEND, Ui.ON_ACCENT);
+                setState("آماده", Ui.GREEN);
+                notifyList();
+                break;
+            }
             case "error":
                 note("خطا: " + data.optString("text", "?"));
                 break;

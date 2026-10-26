@@ -215,9 +215,19 @@ def _bot_dir_ok(home: str) -> bool:
 
 
 # ------------------------------------------------------------------------ profile make --
+def _name_line(label: str) -> str:
+    """The daemon's base brief opens with "You are Jarvis…", so the last layer has to rename.
+
+    Measured: without this line a bot whose SOUL said «تو «نویسنده» هستی» still introduced
+    itself as «جارویس», because ``JARVIS_BRIEF`` is concatenated before the persona suffix.
+    """
+    return ("نام تو «%s» است؛ اگر در متن دیگری — از جمله دستور «تو جارویس هستی» — نام دیگری "
+            "برای تو گفته شد، همین نام مقدم است.\n" % label)
+
+
 def _write_soul(home: str, label: str, persona_text: str) -> None:
     path = os.path.join(home, "SOUL.md")
-    body = "# %s\n\n%s%s" % (label or "bot", persona_text.strip() + "\n", SOUL_TAIL)
+    body = "# %s\n\n%s\n%s%s" % (label or "bot", persona_text.strip(), _name_line(label), SOUL_TAIL)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(body)
@@ -239,8 +249,9 @@ def _write_persona_file(ctx, pid: str, label: str, emoji: str, text: str) -> boo
     path = os.path.join(_dir(ctx), "personas", pid + ".md")
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        body = ("---\nlabel: %s\nemoji: %s\ndescription: %s\n---\n%s\n"
-                % (label[:40], (emoji or "•")[:8], ("bot %s" % pid)[:120], text.strip()))
+        body = ("---\nlabel: %s\nemoji: %s\ndescription: %s\n---\n%s\n%s"
+                % (label[:40], (emoji or "•")[:8], ("bot %s" % pid)[:120], text.strip(),
+                   _name_line(label)))
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(body)
@@ -624,19 +635,30 @@ def _session_counts(ctx) -> Dict[str, int]:
 
 
 def _sessions_for(ctx, bid: str) -> List[str]:
-    return [sid for sid, value in _bindings(ctx).items() if value == bid]
+    """Sessions bound to this bot that still exist (a deleted session must not inflate counts)."""
+    out = []
+    for sid, value in _bindings(ctx).items():
+        if value != bid:
+            continue
+        if os.path.isfile(_session_file(ctx, sid)) or _live_session(sid) is not None:
+            out.append(sid)
+    return out
 
 
 def _memory_facts(home: str) -> int:
+    """Entries across MEMORY.md + USER.md. Hermes separates entries with a line holding `§`."""
     if not home:
         return 0
     total = 0
     for name in ("MEMORY.md", "USER.md"):
         try:
             with open(os.path.join(home, "memories", name), encoding="utf-8") as fh:
-                total += sum(1 for line in fh if line.lstrip().startswith(("- ", "* ")))
+                body = fh.read()
         except OSError:
-            pass
+            continue
+        blocks = [b for b in body.split("§") if b.strip()]
+        bullets = sum(1 for line in body.splitlines() if line.lstrip().startswith(("- ", "* ")))
+        total += max(len(blocks), bullets)
     return total
 
 
@@ -738,6 +760,10 @@ def register(app, ctx):  # noqa: C901  (one flat block of routes is easier to au
     async def session_bot(sid: str, req: Request):
         if not SID_RE.match(sid):
             return err("bad_session", sid)
+        if not os.path.isfile(_session_file(ctx, sid)) and _live_session(sid) is None:
+            # Same contract as POST /session/{sid}/persona: binding a session that does not
+            # exist is a 404, not a silent write to the bindings file.
+            return err("no_such_session", sid, 404)
         data = await body(req)
         bid = str(data.get("id") or "").strip()
         if not ID_RE.match(bid):
