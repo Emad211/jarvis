@@ -37,6 +37,13 @@ final class Voice {
     private final AtomicBoolean recording = new AtomicBoolean(false);
     private final ByteArrayOutputStream pcm = new ByteArrayOutputStream();
     private MediaPlayer player;
+    /** Rendered sentence urls, keyed by sentence index; "" means that sentence failed. */
+    private final java.util.Map<Integer, String> ready = new java.util.HashMap<>();
+    private int nextToPlay;
+    /** Bumped by every new utterance so late answers from an old one are ignored. */
+    private int generation;
+    /** When the free TTS quota is done, every model answers 429; stop hammering it. */
+    private long ttsCooldownUntil;
 
     Voice(MainActivity a) {
         this.a = a;
@@ -115,39 +122,116 @@ final class Voice {
         }, fail::on);
     }
 
-    /** Play a rendered answer. `url` is the path jarvisd returned ("/audio/x.mp3"). */
+    /**
+     * Speak an answer sentence by sentence.
+     *
+     * Rendering the whole reply first meant the phone stayed silent for 5–9 s (measured), which
+     * is exactly the "it is slow" feeling this app is supposed to kill. Each sentence is sent
+     * as its own request and played as soon as it arrives, so the first words start ~1–2 s in
+     * while the rest is still being rendered. A failed sentence is skipped, not fatal.
+     */
     void speak(String text) {
         if (text == null || text.trim().isEmpty()) {
             return;
         }
+        if (System.currentTimeMillis() < ttsCooldownUntil) {
+            return; // quota is gone: silence beats 2.4 s of failed requests on every answer
+        }
         String trimmed = text.length() > 1200 ? text.substring(0, 1200) : text;
-        Api.post("/voice/out", Api.body("text", trimmed), 120000, res -> {
-            String url = res.optString("url", "");
-            if (url.isEmpty()) {
-                a.toast("صدا ساخته نشد");
+        java.util.List<String> chunks = chunk(trimmed);
+        stopPlayback();
+        final int gen = ++generation;
+        ready.clear();
+        nextToPlay = 0;
+        for (int i = 0; i < chunks.size(); i++) {
+            final int index = i;
+            Api.post("/voice/out", Api.body("text", chunks.get(i)), 120000, res -> {
+                if (gen != generation) {
+                    return; // a newer utterance took over
+                }
+                ready.put(index, Api.base() + res.optString("url", ""));
+                playIfNext();
+            }, msg -> {
+                if (gen != generation) {
+                    return;
+                }
+                ready.put(index, ""); // fails: skip this sentence, keep the rest
+                if (index == 0) {
+                    // The very first sentence failing means the service, not the sentence:
+                    // back off for ten minutes and say so once.
+                    ttsCooldownUntil = System.currentTimeMillis() + 600000L;
+                    a.toast("صدا فعلاً در دسترس نیست (سهمیه)");
+                }
+                playIfNext();
+            });
+        }
+    }
+
+    /** Plays sentence `nextToPlay` if it has arrived, else waits for its request. */
+    private void playIfNext() {
+        if (player != null) {
+            return;
+        }
+        while (ready.containsKey(nextToPlay)) {
+            String url = ready.remove(nextToPlay);
+            nextToPlay++;
+            if (url != null && !url.isEmpty()) {
+                play(url);
                 return;
             }
-            play(Api.base() + url);
-        }, msg -> a.toast("صدا: " + msg));
+        }
+    }
+
+    /** Split on sentence ends and newlines; ~180 chars per request keeps latency low. */
+    private static java.util.List<String> chunk(String text) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        StringBuilder cur = new StringBuilder();
+        for (String rawLine : text.split("\n")) {
+            String line = rawLine.trim();
+            if (line.isEmpty()) {
+                continue;
+            }
+            for (String part : line.split("(?<=[.!?؟۔؛:])\\s+")) {
+                if (part.trim().isEmpty()) {
+                    continue;
+                }
+                if (cur.length() > 0 && cur.length() + part.length() > 180) {
+                    out.add(cur.toString().trim());
+                    cur.setLength(0);
+                }
+                cur.append(part).append(' ');
+            }
+        }
+        if (cur.toString().trim().length() > 0) {
+            out.add(cur.toString().trim());
+        }
+        if (out.isEmpty()) {
+            out.add(text.trim());
+        }
+        return out;
     }
 
     private void play(String url) {
-        stopPlayback();
         try {
             player = new MediaPlayer();
             player.setAudioStreamType(AudioManager.STREAM_MUSIC);
             player.setDataSource(url);
             player.setOnPreparedListener(MediaPlayer::start);
-            player.setOnCompletionListener(mp -> stopPlayback());
+            player.setOnCompletionListener(mp -> {
+                stopPlayback();
+                playIfNext();
+            });
             player.setOnErrorListener((mp, what, extra) -> {
                 a.toast("پخش نشد (" + what + ")");
                 stopPlayback();
+                playIfNext();
                 return true;
             });
             player.prepareAsync();
         } catch (Exception e) {
             a.toast("پخش نشد: " + e.getClass().getSimpleName());
             stopPlayback();
+            playIfNext();
         }
     }
 

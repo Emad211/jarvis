@@ -138,7 +138,9 @@ final class ChatAdapter extends BaseAdapter {
         if (shots > 0) {
             prose = cleaned.toString().trim();
             if (prose.isEmpty()) {
-                prose = shots == 1 ? "📷 تصویر گرفته شد." : "📷 " + shots + " تصویر.";
+                // No emoji here: the bundled Persian font has no glyph for 📷 and it renders
+                // as an empty box, which looks like a bug rather than a picture.
+                prose = shots == 1 ? "یک تصویر گرفته شد." : shots + " تصویر گرفته شد.";
             }
         }
         text.setText(Md.render(prose.trim(), Ui.ACCENT, Ui.alpha(Ui.ACCENT, 22)));
