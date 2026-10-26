@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Shown in Settings → Accessibility. The wording has to be honest: an accessibility
+         service is the most powerful permission an app can ask for, and the user is entitled to
+         know exactly why Jarvis wants it and what it does not do. -->
+    <string name="a11y_label">جارویس — کنترل گوشی</string>
+    <string name="a11y_summary">تا جارویس بتواند بدون کابل و بدون برنامهٔ اضافه، روی گوشی کار کند</string>
+    <string name="a11y_description">با روشن‌کردن این سرویس، جارویس می‌تواند صفحه را بخواند، لمس و اسکرول کند، تایپ کند، اسکرین‌شات بگیرد و اپ‌ها را باز کند.\n\nاین سرویس هیچ چیز را ذخیره یا ارسال نمی‌کند؛ فقط وقتی خودت در جارویس کاری می‌خواهی از آن استفاده می‌شود. هرجا هم که بخواهی می‌توانی خاموشش کنی.</string>
+</resources>

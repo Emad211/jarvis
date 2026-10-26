@@ -27,8 +27,10 @@ spec() {
     router) command -v omniroute >/dev/null && echo "$HERMES/router.log|omniroute" ;;
     jarvis) echo "$HERMES/jarvis.log|$VENV_PY $HOME/.local/bin/jarvisd.py" ;;
     # Cron used to be ticked by the messaging gateway. The gateway is gone, so this loop is
-    # what makes `hermes cron` fire at all: one tick a minute, quiet unless a job runs.
-    cron)   echo "$HERMES/cron.log|sh -c 'while :; do hermes cron tick --accept-hooks || true; sleep 55; done'" ;;
+    # what makes `hermes cron` fire at all. Each bot (jarvisd_bots) lives in its own Hermes
+    # profile with its own cron store, so `cron-supervise` ticks the main profile *and* every
+    # profile under ~/.hermes/profiles/ — one tick each, per loop.
+    cron)   echo "$HERMES/cron.log|sh $HOME/.local/bin/hermes-svc cron-supervise" ;;
   esac
 }
 
@@ -67,6 +69,29 @@ stop() {
 
 all() { echo gwctl jarvis agy router cron; }
 
+# Body of the `cron` service. The main profile keeps writing to $HERMES/cron.log (that is
+# where the service redirects stdout); each bot profile writes to its own <profile>/cron.log.
+# Three rules, learned the hard way:
+#   * one profile's tick can never stop the next one (every call is `|| true`);
+#   * a profile with no cron store has nothing to run, so it is skipped — that keeps the loop
+#     at ~0 s when there are no bots and turns itself on the moment `<profile>/cron/jobs.json`
+#     appears (jarvisd_bots creates it with the bot's first job);
+#   * `cron tick` writes nothing when no job is due, and profile output is buffered and only
+#     appended when non-empty, so a quiet hour adds no lines to any log.
+cron_supervise() {
+  while :; do
+    hermes cron tick --accept-hooks || true
+    for d in "$HERMES"/profiles/*/; do
+      [ -d "$d" ] || continue
+      [ -f "$d/cron/jobs.json" ] || continue
+      p=$(basename "$d")
+      out=$(hermes -p "$p" cron tick --accept-hooks 2>&1) || true
+      [ -n "$out" ] && printf '%s\n' "$out" >> "$d/cron.log"
+    done
+    sleep 55
+  done
+}
+
 boot() {
   termux-wake-lock
   pgrep -x sshd >/dev/null || sshd
@@ -86,5 +111,6 @@ case "$1" in
   list)       for s in $(all); do [ -n "$(spec "$s")" ] || continue
                 running "$s" && echo "$s running" || echo "$s stopped"; done ;;
   boot)       boot ;;
+  cron-supervise) cron_supervise ;;
   *)          sed -n '2,12p' "$0"; exit 2 ;;
 esac

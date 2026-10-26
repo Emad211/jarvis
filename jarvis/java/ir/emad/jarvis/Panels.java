@@ -880,6 +880,45 @@ final class Panels {
         Sheet.show(a, "بات تازه", box);
     }
 
+    // -------------------------------------------------------------------- a11y --
+    /**
+     * Device control without Shizuku or adb. The service is part of this app, so the whole
+     * prerequisite chain a stranger cannot follow (wireless debugging, a pairing code, a second
+     * app started by hand) collapses into one system toggle — which this screen explains and
+     * deep-links to.
+     */
+    static void hands(Activity a) {
+        boolean on = A11y.ready() && Bridge.VERSION > 0;
+        LinearLayout box = Ui.col(a);
+        box.addView(Sheet.section(a, on ? "دست‌های جارویس: روشن" : "دست‌های جارویس: خاموش"),
+                Ui.fill());
+        box.addView(Ui.text(a, on
+                        ? "جارویس می‌تواند صفحه را بخواند، لمس کند، تایپ کند و اسکرین‌شات بگیرد — "
+                        + "بدون کابل و بدون برنامهٔ اضافه."
+                        : "برای کار با گوشی، این سرویس را یک‌بار روشن کن. جایگزینش Shizuku یا "
+                        + "کابل adb است که هر دو نصب و جفت‌سازی دستی می‌خواهند.",
+                12.5f, Ui.DIM, false), Ui.fill());
+        box.addView(Sheet.item(a, on ? "تنظیمات دسترسی را باز کن" : "روشن‌کردن سرویس",
+                "تنظیمات → دسترسی‌پذیری → جارویس", on ? Ui.GREEN : Ui.AMBER,
+                () -> {
+                    try {
+                        a.startActivity(new android.content.Intent(
+                                android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                    } catch (Exception e) {
+                        toast(a, "تنظیمات باز نشد");
+                    }
+                }), Ui.fill());
+        box.addView(Sheet.divider(a), Ui.fill());
+        box.addView(Sheet.item(a, "امتحان کن", "یک‌بار صفحه را می‌خواند", null, () -> {
+            Api.post("/fast", Api.body("intent", "info", "args", new JSONObject()), 15000,
+                    res -> toast(a, res.optBoolean("ok", false)
+                            ? "کار می‌کند: " + res.optString("source", "")
+                            : "نشد: " + res.optString("error", "?")),
+                    msg -> toast(a, "نشد: " + msg));
+        }), Ui.fill());
+        Sheet.show(a, "کنترل گوشی", box);
+    }
+
     // --------------------------------------------------------------------- helpers --
     /** Our own loading panel: a dark rounded card with one line, not the system spinner box. */
     private static AlertDialog busy(Activity a, String text) {

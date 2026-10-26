@@ -341,7 +341,11 @@ def build_agent(session: Session, model: str, toolsets: List[str], reasoning: st
         provider=_route_for(model),
         quiet_mode=True,
         verbose_logging=False,
-        enabled_toolsets=toolsets or None,
+        # MCP servers become toolsets named `mcp-<server>` by Hermes' own discovery, and a
+        # toolset you do not name is a toolset you do not get. Without this the agent could see
+        # an MCP server in the panel and still have to shell out to reach it.
+        enabled_toolsets=[*toolsets, *["mcp-" + s for s in (load_config().get("mcp_servers") or {})]]
+        or None,
         reasoning_config={"effort": reasoning} if reasoning else None,
         ephemeral_system_prompt=brief,
         session_id=session.id,

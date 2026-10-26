@@ -29,5 +29,20 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- The phone's hands without Shizuku or an adb pairing. The user enables it once in
+             Settings → Accessibility; `Bridge` then lets jarvisd act through it over loopback. -->
+        <service
+            android:name=".A11y"
+            android:exported="true"
+            android:label="@string/a11y_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/a11y_service" />
+        </service>
     </application>
 </manifest>

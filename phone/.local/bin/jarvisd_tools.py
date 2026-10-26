@@ -604,6 +604,20 @@ def register(app, ctx):  # noqa: C901
     from fastapi import Request
     from fastapi.responses import JSONResponse
 
+    # MCP tools only exist inside a process that has run discovery. `hermes` does it from its
+    # own CLI entry point; jarvisd never did, which is why the agent could reach an MCP server
+    # only by shelling out to the CLI. This is Hermes' own helper: it self-gates on config,
+    # spawns one shared background thread and returns at once (measured: 1.03 s to return, the
+    # 7 deepwiki tools registered 15.1 s later). Registration alone is not enough — the agent
+    # must also name the server's toolset, `mcp-<server>`, in `enabled_toolsets`.
+    try:
+        import logging as _logging
+        from hermes_cli.mcp_startup import start_background_mcp_discovery as _mcp_start
+        _mcp_start(logger=_logging.getLogger("jarvisd"), thread_name="jarvisd-mcp")
+        ctx["notify"]("tools: background MCP discovery started")
+    except Exception as _exc:  # noqa: BLE001  (no MCP stack, or a different Hermes layout)
+        ctx["notify"]("tools: MCP discovery not started: %s" % _exc)
+
     def err(code: str, detail: str = "", status: int = 400):
         return JSONResponse({"ok": False, "error": code, "detail": detail}, status_code=status)
 

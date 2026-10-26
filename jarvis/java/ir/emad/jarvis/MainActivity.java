@@ -85,6 +85,10 @@ public class MainActivity extends Activity {
         getWindow().setNavigationBarColor(Ui.SURFACE);
         buildShell();
         askNotificationPermission();
+        // The phone's hands: a loopback listener so jarvisd can act without adb or Shizuku.
+        // It answers /ping even when the accessibility service is still off, so the daemon can
+        // tell "app not running" apart from "permission not granted".
+        Bridge.start(this);
         connect(true);
     }
 
@@ -704,6 +708,7 @@ public class MainActivity extends Activity {
                 "راه‌اندازی اولیه",
                 "صدا و صدای جارویس",
                 ttsOn ? "صدا روی پاسخ‌ها: روشن" : "صدا روی پاسخ‌ها: خاموش",
+                "کنترل گوشی",
                 "کپی آخرین پاسخ");
         Sheet.rows(this, "منو", items, which -> {
                     switch (which) {
@@ -756,6 +761,9 @@ public class MainActivity extends Activity {
                             ttsOn = !ttsOn;
                             prefs.edit().putBoolean("tts", ttsOn).apply();
                             toast(ttsOn ? "صدا روشن شد" : "صدا خاموش شد");
+                            break;
+                        case 15:
+                            Panels.hands(this);
                             break;
                         default:
                             copyLast();
