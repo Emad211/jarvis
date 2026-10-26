@@ -81,7 +81,9 @@ JARVIS_BRIEF = (
 )
 
 # Toolsets offered by the app; preset "fast" keeps the prompt small (quicker first token).
-FAST_TOOLSETS = ["terminal", "file", "todo", "memory", "vision", "clarify"]
+# `skills` and `cronjob` are in the fast preset on purpose: self-improvement (the agent writes
+# a skill after it learns something) and scheduling are part of the product, not add-ons.
+FAST_TOOLSETS = ["terminal", "file", "todo", "memory", "skills", "vision", "clarify"]
 TOOLSETS = [
     "web", "browser", "terminal", "file", "code_execution", "vision", "image_gen", "tts",
     "skills", "todo", "memory", "session_search", "clarify", "delegation", "cronjob",
@@ -287,6 +289,7 @@ def build_agent(session: Session, model: str, toolsets: List[str], reasoning: st
 
     agent = AIAgent(
         model=model,
+        provider=_route_for(model),
         quiet_mode=True,
         verbose_logging=False,
         enabled_toolsets=toolsets or None,
@@ -311,11 +314,17 @@ def build_agent(session: Session, model: str, toolsets: List[str], reasoning: st
 
 
 def _fallback_chain() -> Optional[List[Dict[str, str]]]:
-    """The configured fallback providers, as AIAgent.fallback_model expects them."""
+    """The configured fallback providers, as AIAgent.fallback_model expects them.
+
+    A provider the last probe could not reach is dropped: on this phone reachability depends
+    on the VPN and the carrier, and retrying a dead endpoint only adds a timeout to a turn.
+    """
     cfg = load_config()
     entries = []
     for item in cfg.get("fallback_providers") or []:
         if isinstance(item, dict) and item.get("provider") and item.get("model"):
+            if _reachable(str(item["provider"])) is False:
+                continue
             entries.append({"provider": str(item["provider"]), "model": str(item["model"])})
     return entries or None
 
@@ -508,6 +517,20 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse  # n
 
 app = FastAPI(title="jarvisd", version=VERSION)
 
+# Optional feature modules (personas, tools/MCP/skills, cron, services, logs). They live in
+# their own files so a half-finished one can never take the console down: a failed import is
+# logged and skipped, and the core chat path keeps working.
+CTX = {"HERMES": HERMES, "HOME": HOME, "JARVIS_DIR": os.path.join(HERMES, "jarvis"),
+       "read_env": read_env, "hermes": lambda *a: _hermes(*a), "now": now, "jdump": jdump,
+       "notify": lambda m: print("jarvisd: %s" % m, flush=True)}
+for _mod_name in ("jarvisd_personas", "jarvisd_tools", "jarvisd_ops", "jarvisd_voice"):
+    try:
+        _mod = __import__(_mod_name)
+        _mod.register(app, CTX)
+        print("jarvisd: %s loaded" % _mod_name, flush=True)
+    except Exception as _exc:  # noqa: BLE001
+        print("jarvisd: %s not loaded: %s" % (_mod_name, _exc), flush=True)
+
 
 @app.get("/health")
 def health():
@@ -566,21 +589,39 @@ def media(name: str):
 # learns whether one is present, and it can write a new one. Writing goes through the same
 # env-file rules as gwctl (`*_API_KEY` / `*_TOKEN`, empty deletes).
 PROVIDERS = [
+    # River AI is the phone's default: DeepSeek V4.1 Flash is the fastest model measured on
+    # this handset with real tool calling, and it is the model the builder of this app runs on.
+    {"id": "river", "label": "River AI", "key_env": "RIVER_API_KEY",
+     "key_url": "https://docs.river.ai", "voice": False, "kind": "openai",
+     "base_url": "https://api.river.ai/v1", "default": True,
+     "note": "سریع‌ترین و ارزان‌ترین",
+     "models": [
+         {"id": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "label": "DeepSeek V4.1 Flash 1017",
+          "tools": True, "vision": True},
+         {"id": "deepseek-ai/DeepSeek-V4.1-Flash", "label": "DeepSeek V4.1 Flash",
+          "tools": True, "vision": True},
+     ]},
     {"id": "google_ai_studio", "label": "Google AI Studio", "key_env": "GEMINI_API_KEY",
-     "key_url": "https://aistudio.google.com/apikey", "voice": True,
+     "key_url": "https://aistudio.google.com/apikey", "voice": True, "kind": "openai",
+     "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+     "note": "صدا و تصویر، رایگان با محدودیت",
      "models": [
          {"id": "gemini-3.5-flash-lite", "label": "Gemini 3.5 Flash Lite (fastest)", "tools": True, "vision": True},
          {"id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash", "tools": True, "vision": True},
          {"id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash", "tools": True, "vision": True},
      ]},
     {"id": "openrouter", "label": "OpenRouter", "key_env": "OPENROUTER_API_KEY",
-     "key_url": "https://openrouter.ai/keys", "voice": False,
+     "key_url": "https://openrouter.ai/keys", "voice": False, "kind": "openai",
+     "base_url": "https://openrouter.ai/api/v1", "note": "مدل رایگان",
      "models": [
          {"id": "nvidia/nemotron-3-ultra-550b-a55b:free", "label": "Nemotron 3 Ultra (free)",
           "tools": True, "vision": False},
      ]},
     {"id": "agentrouter", "label": "AgentRouter", "key_env": "AGENTROUTER_API_KEY",
-     "key_url": "https://agentrouter.org", "voice": False,
+     "key_url": "https://agentrouter.org", "voice": False, "kind": "anthropic",
+     "base_url": "https://agentrouter.org/v1",
+     "headers": {"User-Agent": "claude-cli/1.0.0 (external, cli)"},
+     "note": "کلید لازم دارد",
      "models": [
          {"id": "gpt-6.1-sol", "label": "GPT 6.1 Sol", "tools": True, "vision": False},
      ]},
@@ -616,6 +657,272 @@ def _env_write(name: str, value: str) -> None:
     os.replace(tmp, ENV_PATH)
     if not had and not value:
         return
+
+
+# ---------------------------------------------------------------- provider health --
+# `reachable` is measured, never assumed. The phone's route to a provider changes with the
+# VPN, the carrier and the provider's own geo rules, so the console shows a dot that comes
+# from a real request instead of from a hardcoded list.
+PROBE_PATH = os.path.join(HERMES, "jarvis", "probe.json")
+PROBE: Dict[str, Dict[str, Any]] = {}
+
+
+def _models(row: Dict[str, Any]) -> List[str]:
+    out = []
+    for m in row.get("models") or []:
+        mid = m.get("id") if isinstance(m, dict) else m
+        if mid:
+            out.append(str(mid))
+    return out
+
+
+def _all_providers() -> List[Dict[str, Any]]:
+    rows = [dict(p) for p in PROVIDERS]
+    for p in custom_providers():
+        rows.append(dict(p, builtin=False,
+                         kind=p.get("kind") or ("anthropic" if p.get("api_mode") ==
+                                                "anthropic_messages" else "openai")))
+    return rows
+
+
+def _provider_row(pid: str) -> Optional[Dict[str, Any]]:
+    return next((p for p in _all_providers() if p.get("id") == pid), None)
+
+
+def _wire(row: Dict[str, Any], model: str = "") -> tuple:
+    """(url, headers, payload, model) for one tiny chat against this provider."""
+    kind = row.get("kind") or "openai"
+    base = (row.get("base_url") or "").rstrip("/")
+    choice = model or next(iter(_models(row)), "")
+    key = read_env(row.get("key_env") or "")
+    headers = {str(k): str(v) for k, v in (row.get("headers") or {}).items()}
+    payload = {"model": choice, "max_tokens": 16,
+               "messages": [{"role": "user", "content": "reply with: ok"}]}
+    if kind == "anthropic":
+        url = base if base.endswith("/messages") else base + "/messages"
+        headers.update({"x-api-key": key, "anthropic-version": "2023-06-01",
+                        "Content-Type": "application/json"})
+    else:
+        url = base if base.endswith("/chat/completions") else base + "/chat/completions"
+        headers.update({"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+    return url, headers, payload, choice
+
+
+async def test_provider(pid: str, model: str = "", timeout: float = 45) -> Dict[str, Any]:
+    """One tiny live call. Never echoes the key; reports code + latency + a short reply."""
+    row = _provider_row(pid)
+    if not row:
+        return {"id": pid, "ok": False, "status": 0, "error": "unknown_provider"}
+    if not read_env(row.get("key_env") or ""):
+        return {"id": pid, "ok": False, "status": 0, "error": "no_key"}
+    url, headers, payload, choice = _wire(row, model)
+    if not choice:
+        return {"id": pid, "ok": False, "status": 0, "error": "no_model"}
+    started = now()
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(url, headers=headers, json=payload)
+        ms = int((now() - started) * 1000)
+        if r.status_code != 200:
+            kind = ("quota" if r.status_code == 429 else
+                    "auth" if r.status_code in (401, 403) else
+                    "bad_model" if r.status_code == 404 else "http_%d" % r.status_code)
+            return {"id": pid, "ok": False, "status": r.status_code, "ms": ms,
+                    "error": kind, "model": choice, "detail": r.text[:200]}
+        return {"id": pid, "ok": True, "status": 200, "ms": ms, "model": choice,
+                "reply": r.text[:200]}
+    except Exception as exc:  # noqa: BLE001
+        ms = int((now() - started) * 1000)
+        return {"id": pid, "ok": False, "status": 0, "ms": ms, "model": choice,
+                "error": "network", "detail": "%s: %s" % (type(exc).__name__, exc)}
+
+
+def _load_probe() -> None:
+    global PROBE
+    try:
+        with open(PROBE_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            PROBE = {k: v for k, v in data.items() if isinstance(v, dict)}
+    except (OSError, ValueError):
+        PROBE = {}
+
+
+def _save_probe() -> None:
+    try:
+        os.makedirs(os.path.dirname(PROBE_PATH), exist_ok=True)
+        tmp = PROBE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(PROBE, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, PROBE_PATH)
+    except OSError:
+        pass
+
+
+def _reachable(pid: str) -> Optional[bool]:
+    entry = PROBE.get(pid)
+    if not isinstance(entry, dict) or "ok" not in entry:
+        return None
+    return bool(entry["ok"])
+
+
+@app.post("/providers/probe")
+async def providers_probe(req: Request):
+    """Measure every provider at once; the app paints the result as a status dot."""
+    body = await _json(req)
+    wanted = body.get("ids")
+    ids = [str(i) for i in wanted] if isinstance(wanted, list) else [p["id"] for p in _all_providers()]
+    results = await asyncio.gather(*[test_provider(i, timeout=12) for i in ids])
+    for r in results:
+        PROBE[str(r.get("id"))] = {"ok": bool(r.get("ok")), "ms": int(r.get("ms") or 0),
+                                   "status": r.get("status") or 0,
+                                   "error": r.get("error") or "", "at": int(now())}
+    _save_probe()
+    return {"results": results, "at": int(now())}
+
+
+@app.post("/providers/default")
+async def providers_default(req: Request):
+    """Make this provider+model the one a fresh session starts on."""
+    body = await _json(req)
+    pid = str(body.get("id") or "")
+    row = _provider_row(pid)
+    if not row:
+        return JSONResponse({"ok": False, "error": "unknown_provider"}, status_code=404)
+    model = str(body.get("model") or next(iter(_models(row)), ""))
+    if not model:
+        return JSONResponse({"ok": False, "error": "no_model"}, status_code=400)
+    res = await apply_model(pid, model)
+    return res
+
+
+# Preferred order. River AI runs the fastest model measured on this handset, but its endpoint
+# is not reachable on every network path this phone uses (measured 2026-10-26: fine through a
+# US exit, TCP 443 dead through a Berlin one), so the default is whatever actually answers.
+PREFERRED = ["river", "google_ai_studio", "openrouter", "agentrouter"]
+
+
+def _preferred_order() -> List[str]:
+    known = [p["id"] for p in _all_providers()]
+    return [p for p in PREFERRED if p in known] + [p for p in known if p not in PREFERRED]
+
+
+@app.post("/providers/autoselect")
+async def providers_autoselect(req: Request):
+    """Probe everything, then point the default at the first provider that really answers."""
+    body = await _json(req)
+    dry = bool(body.get("dry"))
+    order = _preferred_order()
+    results = await asyncio.gather(*[test_provider(p, timeout=12) for p in order])
+    for r in results:
+        PROBE[str(r.get("id"))] = {"ok": bool(r.get("ok")), "ms": int(r.get("ms") or 0),
+                                   "status": r.get("status") or 0,
+                                   "error": r.get("error") or "", "at": int(now())}
+    _save_probe()
+    ok_rows = [r for r in results if r.get("ok") and r.get("model")]
+    pick = ok_rows[0] if ok_rows else None
+    current = dict(load_config().get("model") or {})
+    changed = False
+    if pick and not dry:
+        if current.get("provider") != pick["id"] or current.get("default") != pick["model"]:
+            await apply_model(pick["id"], pick["model"])
+            changed = True
+    return {"ok": bool(pick), "chosen": ({"id": pick["id"], "model": pick["model"],
+                                          "ms": pick.get("ms")} if pick else None),
+            "previous": {"provider": current.get("provider", ""),
+                         "model": current.get("default", "")},
+            "changed": changed, "dry": dry, "order": order,
+            "results": [{k: r.get(k) for k in ("id", "ok", "ms", "status", "error")}
+                        for r in results]}
+
+
+async def _autoselect_quietly() -> None:
+    """Boot-time convenience: if the preferred provider came back a moment ago, use it.
+    Never fights a choice the user just made in the app."""
+    try:
+        order = _preferred_order()
+        top = order[0] if order else ""
+        entry = PROBE.get(top) or {}
+        fresh = (now() - float(entry.get("at") or 0)) < 600
+        if top and entry.get("ok") is True and fresh:
+            current = dict(load_config().get("model") or {})
+            if current.get("provider") != top:
+                await providers_autoselect(None)  # type: ignore[arg-type]
+    except Exception as exc:  # noqa: BLE001
+        print("jarvisd: autoselect skipped: %s" % exc, flush=True)
+
+
+async def apply_model(pid: str, model: str) -> Dict[str, Any]:
+    """Point Hermes' own config at this provider+model and drop the warm agents."""
+    previous = dict(load_config().get("model") or {})
+    row = _provider_row(pid) or {}
+    if row:
+        sync_provider(row)
+    code, out = _hermes("config", "set", "model.provider", pid)
+    code2, out2 = _hermes("config", "set", "model.default", model)
+    mode = "anthropic_messages" if (row.get("kind") == "anthropic") else "chat_completions"
+    if row:
+        _hermes("config", "set", "model.api_mode", mode)
+    for s in HUB.sessions.values():
+        s.agent = None
+    ok = code == 0 and code2 == 0
+    return {"ok": ok, "provider": pid, "model": model,
+            "previous": {"provider": previous.get("provider", ""),
+                         "model": previous.get("default", "")},
+            "restart_required": False, "detail": (out + " " + out2).strip()[-200:]}
+
+
+def sync_provider(row: Dict[str, Any], force: bool = False) -> None:
+    """Teach Hermes about one provider. Idempotent and cheap: a value that already matches
+    is not rewritten, because every `hermes config set` is a fresh Python process (~2 s on
+    this phone) and six of them per provider used to add a minute to boot."""
+    pid = row.get("id") or ""
+    if not pid or not row.get("base_url"):
+        return
+    current = dict(((load_config().get("providers") or {}).get(pid) or {}))
+    openai_style = row.get("kind") != "anthropic"
+    if openai_style:
+        want = {"name": row.get("label") or pid,
+                "key_env": row.get("key_env") or "",
+                "transport": "chat_completions",
+                "api": row["base_url"]}
+    else:
+        want = {"name": row.get("label") or pid,
+                "key_env": row.get("key_env") or "",
+                "api_mode": "anthropic_messages",
+                "base_url": row["base_url"]}
+    models = _models(row)
+    if models:
+        want["models"] = models
+        want["default_model"] = models[0]
+    headers = row.get("headers") or {}
+    if headers:
+        want["extra_headers"] = {str(k): str(v) for k, v in headers.items()}
+
+    for key, value in want.items():
+        have = current.get(key)
+        if not force:
+            same = (have == value if isinstance(value, str)
+                    else jdump(have) == jdump(value))
+            if same:
+                continue
+        _hermes("config", "set", "providers.%s.%s" % (pid, key),
+                value if isinstance(value, str) else json.dumps(value))
+    if not current.get("models") and "models" not in want:
+        pass
+
+
+def sync_builtins() -> None:
+    """Register every builtin provider with Hermes, the default one first."""
+    primary = str((load_config().get("model") or {}).get("provider") or "")
+    rows = [r for r in PROVIDERS if r.get("base_url")]
+    rows.sort(key=lambda r: 0 if r.get("id") == primary else 1)
+    for row in rows:
+        try:
+            sync_provider(row)
+        except Exception as exc:  # noqa: BLE001
+            print("jarvisd: sync %s failed: %s" % (row.get("id"), exc), flush=True)
 
 
 @app.get("/setup/state")
@@ -666,45 +973,14 @@ async def setup_key(req: Request):
 async def setup_test(req: Request):
     """One tiny call to the provider with the stored key. Never echoes the key."""
     body = await _json(req)
-    p = _provider(str(body.get("provider") or ""))
-    if not p:
-        return {"ok": False, "status": 0, "error": "unknown_provider"}
-    key = read_env(p["key_env"])
-    if not key:
-        return {"ok": False, "status": 0, "error": "no_key"}
-    model = str(body.get("model") or p["models"][0]["id"])
-    started = now()
-    try:
-        import httpx
-        if p["id"] == "google_ai_studio":
-            url = ("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
-            headers = {"Authorization": "Bearer " + key}
-            payload = {"model": model, "max_tokens": 16,
-                       "messages": [{"role": "user", "content": "reply with: ok"}]}
-        elif p["id"] == "openrouter":
-            url = "https://openrouter.ai/api/v1/chat/completions"
-            headers = {"Authorization": "Bearer " + key}
-            payload = {"model": model, "max_tokens": 16,
-                       "messages": [{"role": "user", "content": "reply with: ok"}]}
-        else:  # agentrouter talks the Anthropic messages shape
-            url = "https://agentrouter.org/v1/messages"
-            headers = {"x-api-key": key, "anthropic-version": "2023-06-01",
-                       "User-Agent": "claude-cli/1.0.0 (external, cli)"}
-            payload = {"model": model, "max_tokens": 16,
-                       "messages": [{"role": "user", "content": "reply with: ok"}]}
-        async with httpx.AsyncClient(timeout=45) as client:
-            r = await client.post(url, headers=headers, json=payload)
-        ms = int((now() - started) * 1000)
-        if r.status_code != 200:
-            kind = "quota" if r.status_code == 429 else ("auth" if r.status_code in (401, 403)
-                                                         else "bad_model" if r.status_code == 404
-                                                         else "http_%d" % r.status_code)
-            return {"ok": False, "status": r.status_code, "ms": ms, "error": kind,
-                    "detail": r.text[:200]}
-        return {"ok": True, "status": 200, "ms": ms, "reply": r.text[:200], "provider": p["id"]}
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "status": 0, "error": "network",
-                "detail": "%s: %s" % (type(exc).__name__, exc)}
+    pid = str(body.get("provider") or "")
+    res = await test_provider(pid, str(body.get("model") or ""))
+    res["provider"] = pid
+    PROBE[pid] = {"ok": bool(res.get("ok")), "ms": int(res.get("ms") or 0),
+                  "status": res.get("status") or 0, "error": res.get("error") or "",
+                  "at": int(now())}
+    _save_probe()
+    return res
 
 
 @app.post("/setup/model")
@@ -715,8 +991,6 @@ async def setup_model(req: Request):
     if not provider or not model:
         return JSONResponse({"ok": False, "error": "provider and model required"},
                             status_code=400)
-    cfg = load_config()
-    previous = (cfg.get("model") or {})
     try:
         import shutil
         backup_dir = os.path.join(HERMES, "hcontrol-backups")
@@ -725,14 +999,7 @@ async def setup_model(req: Request):
                      os.path.join(backup_dir, "config-%d.yaml" % int(now())))
     except OSError:
         pass
-    code, out = _hermes("config", "set", "model.provider", provider)
-    code2, out2 = _hermes("config", "set", "model.default", model)
-    for s in HUB.sessions.values():
-        s.agent = None
-    return {"ok": code == 0 and code2 == 0, "provider": provider, "model": model,
-            "previous": {"provider": previous.get("provider", ""),
-                         "model": previous.get("default", "")},
-            "restart_required": False, "detail": (out + " " + out2)[-200:]}
+    return await apply_model(provider, model)
 
 
 def _hermes(*args: str) -> tuple:
@@ -782,19 +1049,30 @@ def _slug(text: str) -> str:
 
 @app.get("/providers")
 def providers_list():
+    current = dict(load_config().get("model") or {})
+    cur_provider = str(current.get("provider") or "")
+    cur_model = str(current.get("default") or "")
     rows = []
-    for p in PROVIDERS:
-        rows.append({"id": p["id"], "label": p["label"], "builtin": True,
-                     "kind": "gemini" if p["id"] == "google_ai_studio" else "openai",
-                     "base_url": "", "models": [m["id"] for m in p["models"]],
-                     "key_env": p["key_env"], "has_key": bool(read_env(p["key_env"]))})
-    for p in custom_providers():
-        rows.append({"id": p["id"], "label": p.get("label", p["id"]), "builtin": False,
-                     "kind": p.get("kind", "openai"), "base_url": p.get("base_url", ""),
-                     "models": p.get("models") or [], "key_env": p.get("key_env", ""),
-                     "has_key": bool(read_env(p.get("key_env", ""))),
+    for p in _all_providers():
+        pid = p["id"]
+        pid_models = _models(p)
+        rows.append({"id": pid, "label": p.get("label") or pid,
+                     "builtin": bool(p.get("builtin", True)),
+                     "kind": p.get("kind") or "openai",
+                     "base_url": p.get("base_url") or "",
+                     "models": pid_models,
+                     "key_env": p.get("key_env") or "",
+                     "key_url": p.get("key_url") or "",
+                     "has_key": bool(read_env(p.get("key_env") or "")),
+                     "reachable": _reachable(pid),
+                     "probed_ms": (PROBE.get(pid) or {}).get("ms"),
+                     "note": p.get("note") or "",
+                     "is_default": cur_provider == pid,
+                     "is_current_model": cur_provider == pid and cur_model in pid_models,
+                     "voice": bool(p.get("voice")),
                      "headers": p.get("headers") or {}})
-    return {"providers": rows, "kinds": [{"id": k, "hint": v["hint"]} for k, v in KINDS.items()]}
+    return {"providers": rows, "current": {"provider": cur_provider, "model": cur_model},
+            "kinds": [{"id": k, "hint": v["hint"]} for k, v in KINDS.items()]}
 
 
 @app.post("/providers")
@@ -835,23 +1113,8 @@ async def providers_add(req: Request):
                  "key_env": key_env, "models": models,
                  "headers": {str(k): str(v) for k, v in headers.items()}})
     save_custom(rows)
-
     # Hermes: keep its own config authoritative for the agent, one scalar at a time.
-    api_mode = KINDS[kind]["api_mode"]
-    _hermes("config", "set", "providers.%s.name" % pid, label)
-    _hermes("config", "set", "providers.%s.key_env" % pid, key_env)
-    if api_mode == "anthropic_messages":
-        _hermes("config", "set", "providers.%s.api_mode" % pid, api_mode)
-        _hermes("config", "set", "providers.%s.base_url" % pid, base_url)
-    else:
-        _hermes("config", "set", "providers.%s.transport" % pid, "chat_completions")
-        _hermes("config", "set", "providers.%s.api" % pid, base_url)
-    if models:
-        _hermes("config", "set", "providers.%s.models" % pid, json.dumps(models))
-        _hermes("config", "set", "providers.%s.default_model" % pid, models[0])
-    if headers:
-        _hermes("config", "set", "providers.%s.extra_headers" % pid,
-                json.dumps({str(k): str(v) for k, v in headers.items()}))
+    sync_provider(dict(rows[-1]))
     for s in HUB.sessions.values():
         s.agent = None
     return {"ok": True, "id": pid, "key_env": key_env, "models": models,
@@ -870,49 +1133,15 @@ async def providers_delete(pid: str):
 
 @app.post("/providers/test")
 async def providers_test(req: Request):
-    """One tiny chat against a custom provider, using whatever wire format it declares."""
+    """One tiny chat against any provider — builtin or custom — with its declared wire format."""
     body = await _json(req)
     pid = str(body.get("id") or "")
-    row = next((p for p in custom_providers() if p.get("id") == pid), None)
-    if not row:
-        return {"ok": False, "error": "unknown_provider"}
-    key = read_env(row.get("key_env", ""))
-    if not key:
-        return {"ok": False, "error": "no_key"}
-    model = str(body.get("model") or (row.get("models") or [""])[0])
-    if not model:
-        return {"ok": False, "error": "no_model"}
-    kind = row.get("kind", "openai")
-    headers = dict(row.get("headers") or {})
-    started = now()
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=45) as client:
-            if kind == "anthropic":
-                url = row["base_url"]
-                if not url.endswith("/messages"):
-                    url = url + "/messages"
-                h = dict(headers, **{"x-api-key": key, "anthropic-version": "2023-06-01",
-                                     "Content-Type": "application/json"})
-                payload = {"model": model, "max_tokens": 16,
-                           "messages": [{"role": "user", "content": "reply with: ok"}]}
-            else:
-                url = row["base_url"]
-                if not url.endswith("/chat/completions"):
-                    url = url + "/chat/completions"
-                h = dict(headers, **{"Authorization": "Bearer " + key,
-                                     "Content-Type": "application/json"})
-                payload = {"model": model, "max_tokens": 16,
-                           "messages": [{"role": "user", "content": "reply with: ok"}]}
-            r = await client.post(url, headers=h, json=payload)
-        ms = int((now() - started) * 1000)
-        if r.status_code != 200:
-            return {"ok": False, "status": r.status_code, "ms": ms,
-                    "error": "http_%d" % r.status_code, "detail": r.text[:300]}
-        return {"ok": True, "status": 200, "ms": ms, "reply": r.text[:200], "model": model}
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "status": 0, "error": "network",
-                "detail": "%s: %s" % (type(exc).__name__, exc)}
+    res = await test_provider(pid, str(body.get("model") or ""))
+    PROBE[pid] = {"ok": bool(res.get("ok")), "ms": int(res.get("ms") or 0),
+                  "status": res.get("status") or 0, "error": res.get("error") or "",
+                  "at": int(now())}
+    _save_probe()
+    return res
 
 
 @app.post("/session/new")
@@ -1138,9 +1367,18 @@ def _default_model() -> str:
         return DEFAULT_MODEL
     cfg = (load_config().get("model") or {})
     cur = cfg.get("default") or ""
-    # The gateway's primary (3.8-flash today) 429s on the free tier; the console prefers
-    # the fastest model that actually answers, and the app can override per session.
-    return cur if cur and "3.8-flash" not in cur else "gemini-3.5-flash-lite"
+    # The configured default is authoritative now: River AI's DeepSeek V4.1 Flash answers on
+    # this phone without the free-tier 429 storms that used to force a lite fallback here.
+    return cur or next(iter(_models(PROVIDERS[0])), "gemini-3.5-flash-lite")
+
+
+def _route_for(model: str) -> Optional[str]:
+    """Which provider serves this model. A session may hop providers mid-conversation, so
+    this is resolved from the model name instead of trusting one global setting."""
+    for row in _all_providers():
+        if model in _models(row):
+            return str(row["id"])
+    return str((load_config().get("model") or {}).get("provider") or "") or None
 
 
 def _sse(ev: Dict[str, Any]) -> str:
@@ -1164,9 +1402,26 @@ def warm_up() -> None:
         print("jarvisd: warm-up failed: %s" % exc, flush=True)
 
 
+def boot() -> None:
+    """Provider sync first (Hermes must know the default model's provider), then the warm
+    agent. Runs off-thread so the HTTP port is open immediately: the app can paint the shell
+    and read /health while the phone is still wiring itself up."""
+    try:
+        sync_builtins()
+    except Exception as exc:  # noqa: BLE001
+        print("jarvisd: provider sync failed: %s" % exc, flush=True)
+    warm_up()
+    if os.environ.get("JARVIS_AUTOSELECT", "1") != "0":
+        try:
+            asyncio.run(_autoselect_quietly())
+        except Exception as exc:  # noqa: BLE001
+            print("jarvisd: autoselect failed: %s" % exc, flush=True)
+
+
 def main() -> None:
     import uvicorn
-    threading.Thread(target=warm_up, name="warmup", daemon=True).start()
+    _load_probe()
+    threading.Thread(target=boot, name="boot", daemon=True).start()
     print("jarvisd %s on http://127.0.0.1:%d" % (VERSION, PORT), flush=True)
     uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning", access_log=False)
 

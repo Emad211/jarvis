@@ -277,7 +277,7 @@ public class MainActivity extends Activity {
                 sessionId = res.optString("session", "");
                 prefs.edit().putString("session", sessionId).apply();
                 messages.clear();
-                adapter.notifyDataSetChanged();
+                notifyList();
                 attachStream();
             }, msg -> note("ساخت گفتگو نشد: " + msg));
             return;
@@ -304,7 +304,7 @@ public class MainActivity extends Activity {
                 modelChip.setText(ChatAdapter.shortModel(model));
             }
             effort = res.optString("reasoning", effort);
-            adapter.notifyDataSetChanged();
+            notifyList();
             attachStream();
         }, msg -> {
             prefs.edit().remove("session").apply();
@@ -613,8 +613,7 @@ public class MainActivity extends Activity {
         lastTurnText = text;
         Msg mine = new Msg(Msg.USER).text(text);
         messages.add(mine);
-        adapter.notifyDataSetChanged();
-        scrollEnd();
+        notifyList();
         setState("می‌فرستم…", Ui.ACCENT);
         Api.post("/session/" + sessionId + "/turn", Api.body("text", text), 20000, res -> {
             if (!res.optBoolean("ok", false)) {
@@ -711,7 +710,11 @@ public class MainActivity extends Activity {
     }
 
     // ------------------------------------------------------------------- providers --
-    /** Any provider, any shape: list, test, add, remove. The daemon owns the writes. */
+    /**
+     * Any provider, any shape. Each row carries a measured dot: green when the daemon's last
+     * real request to it succeeded, red when it did not (a provider can be perfectly healthy
+     * and still be unreachable from this phone's current network), grey when not tried yet.
+     */
     private void providersDialog() {
         Api.get("/providers", 15000, res -> {
             JSONArray rows = res.optJSONArray("providers");
@@ -719,70 +722,171 @@ public class MainActivity extends Activity {
                 toast("لیست پرووایدرها نیامد");
                 return;
             }
-            final List<String> ids = new ArrayList<>();
-            final List<String> labels = new ArrayList<>();
+            JSONObject cur = res.optJSONObject("current");
+            String curLine = cur == null ? "—"
+                    : cur.optString("provider", "—") + " · " + cur.optString("model", "—");
+
+            LinearLayout box = Ui.col(this);
+            box.addView(Sheet.section(this, "مدل فعلی  " + curLine), Ui.fill());
+            box.addView(Sheet.item(this, "بهترین را خودکار پیدا کن",
+                            "همه را تست می‌کند و اولین‌ای که واقعاً جواب می‌دهد را پیش‌فرض می‌کند",
+                            null, this::autoselect), Ui.fill());
+            box.addView(Sheet.divider(this), Ui.fill());
+            box.addView(Sheet.item(this, "افزودن پرووایدر دلخواه",
+                            "هر آدرسی: OpenAI · Anthropic · Gemini · محلی",
+                            null, this::addProviderDialog), Ui.fill());
+            box.addView(Sheet.divider(this), Ui.fill());
+            box.addView(Sheet.section(this, "پرووایدرها"), Ui.fill());
+
             for (int i = 0; i < rows.length(); i++) {
                 JSONObject p = rows.optJSONObject(i);
                 if (p == null) {
                     continue;
                 }
-                ids.add(p.optString("id", ""));
-                String state = p.optBoolean("has_key") ? "کلید دارد" : "بدون کلید";
-                labels.add(p.optString("label", "") + "  ·  " + state
-                        + (p.optBoolean("builtin") ? "  ·  داخلی" : ""));
-            }
-            labels.add(0, "افزودن پرووایدر دلخواه");
-            ids.add(0, "");
-            Sheet.rows(this, "پرووایدرها", labels, which -> {
-                if (which == 0) {
-                    addProviderDialog();
+                final String id = p.optString("id", "");
+                final String label = p.optString("label", id);
+                boolean hasKey = p.optBoolean("has_key", false);
+                boolean prober = p.has("reachable") && !p.isNull("reachable");
+                Boolean reach = prober ? p.optBoolean("reachable") : null;
+                // A provider with no key has never been tried, so it gets no dot at all:
+                // a red dot there would read as "broken" instead of "not configured".
+                Integer dot = !hasKey || reach == null ? null : (reach ? Ui.GREEN : Ui.RED);
+
+                String note = p.optString("note", "");
+                StringBuilder sub = new StringBuilder();
+                if (!hasKey) {
+                    sub.append("بدون کلید");
+                    if (!note.isEmpty()) {
+                        sub.append(" · ").append(note);
+                    }
                 } else {
-                    providerActions(ids.get(which), labels.get(which));
+                    sub.append("کلید ✓");
+                    if (reach != null) {
+                        sub.append(reach ? " · پاسخ می‌دهد" : " · در دسترس نیست");
+                        if (reach && p.optLong("probed_ms", 0) > 0) {
+                            sub.append(" · ").append(p.optLong("probed_ms", 0)).append("ms");
+                        }
+                    }
+                    if (p.optBoolean("is_default", false)) {
+                        sub.append(" · پیش‌فرض");
+                    }
+                    if (!note.isEmpty()) {
+                        sub.append(" · ").append(note);
+                    }
                 }
-            });
+                String title = label;
+                box.addView(Sheet.item(this, title, sub.toString(), dot,
+                        () -> providerActions(id, label)), Ui.fill());
+                box.addView(Sheet.divider(this), Ui.fill());
+            }
+            box.addView(Sheet.item(this, "همه را دوباره تست کن",
+                            "وضعیت سبز/قرمز را از نو اندازه می‌گیرد", null, this::probeAll),
+                    Ui.fill());
+            Sheet.show(this, "پرووایدرها", box);
         }, msg -> toast("لیست نیامد: " + msg));
     }
 
+    /** Measures every provider through the daemon and reopens the list with fresh dots. */
+    private void probeAll() {
+        AlertDialog spin = progress("تست همه…");
+        Api.post("/providers/probe", Api.body(), 90000, res -> {
+            spin.dismiss();
+            int ok = 0;
+            JSONArray results = res.optJSONArray("results");
+            for (int i = 0; results != null && i < results.length(); i++) {
+                JSONObject r = results.optJSONObject(i);
+                if (r != null && r.optBoolean("ok", false)) {
+                    ok++;
+                }
+            }
+            toast(ok + " پرووایدر جواب داد");
+            providersDialog();
+        }, msg -> {
+            spin.dismiss();
+            toast("تست نشد: " + msg);
+        });
+    }
+
+    /** Picks the first provider that answers and makes it the default model. */
+    private void autoselect() {
+        AlertDialog spin = progress("تست همه پرووایدرها…");
+        Api.post("/providers/autoselect", Api.body(), 120000, res -> {
+            spin.dismiss();
+            JSONObject chosen = res.optJSONObject("chosen");
+            if (chosen == null) {
+                toast("هیچ پرووایدری جواب نداد — اتصال را ببین");
+                return;
+            }
+            String mid = chosen.optString("model", "");
+            this.model = mid;
+            prefs.edit().putString("model", mid).apply();
+            modelChip.setText(ChatAdapter.shortModel(mid));
+            toast(chosen.optString("id", "") + " · " + chosen.optLong("ms", 0) + " ms");
+            if (!sessionId.isEmpty() && !mid.isEmpty()) {
+                Api.post("/session/" + sessionId + "/model", Api.body("model", mid), 15000,
+                        r -> { }, m -> { });
+            }
+            loadCatalog();
+        }, msg -> {
+            spin.dismiss();
+            toast("انتخاب نشد: " + msg);
+        });
+    }
+
     private void providerActions(String id, String label) {
-        java.util.List<String> actions = java.util.Arrays.asList(
-                "تست کلید", "حذف", "اولین مدلش را پیش‌فرض کن");
-        Sheet.rows(this, label, actions, which -> {
-                    if (which == 0) {
-                        AlertDialog spin = progress("تست…");
-                        Api.post("/providers/test", Api.body("id", id), 60000, res -> {
-                            spin.dismiss();
-                            toast(res.optBoolean("ok", false)
-                                    ? "کار می‌کند (" + res.optInt("ms", 0) + " ms)"
-                                    : "نشد: " + res.optString("error", "?"));
-                        }, msg -> {
-                            spin.dismiss();
-                            toast("نشد: " + msg);
-                        });
-                    } else if (which == 1) {
-                        Api.delete("/providers/" + id, 20000, res -> {
-                            toast("حذف شد");
-                            loadCatalog();
-                        }, msg -> toast("حذف نشد: " + msg));
-                    } else {
-                        Api.get("/providers", 15000, res2 -> {
-                            JSONArray rows = res2.optJSONArray("providers");
-                            for (int i = 0; rows != null && i < rows.length(); i++) {
-                                JSONObject p = rows.optJSONObject(i);
-                                if (p != null && id.equals(p.optString("id"))) {
-                                    JSONArray models = p.optJSONArray("models");
-                                    String m = models != null && models.length() > 0
-                                            ? models.optString(0) : "";
-                                    if (m.isEmpty()) {
-                                        toast("این پرووایدر مدلی ندارد");
-                                    } else {
-                                        applyModel(id, m);
-                                    }
-                                    return;
-                                }
-                            }
-                        }, msg -> toast(msg));
+        LinearLayout box = Ui.col(this);
+        box.addView(Sheet.item(this, "تست کلید", "یک درخواست کوچک واقعی می‌فرستد",
+                null, () -> {
+                    AlertDialog spin = progress("تست…");
+                    Api.post("/providers/test", Api.body("id", id), 60000, res -> {
+                        spin.dismiss();
+                        toast(res.optBoolean("ok", false)
+                                ? "کار می‌کند (" + res.optInt("ms", 0) + " ms)"
+                                : "نشد: " + res.optString("error", "?"));
+                    }, msg -> {
+                        spin.dismiss();
+                        toast("نشد: " + msg);
+                    });
+                }), Ui.fill());
+        box.addView(Sheet.divider(this), Ui.fill());
+        box.addView(Sheet.item(this, "انتخاب مدل و پیش‌فرض‌کردن", id,
+                null, () -> chooseModel(id)), Ui.fill());
+        box.addView(Sheet.divider(this), Ui.fill());
+        box.addView(Sheet.item(this, "حذف این پرووایدر", "کلیدش هم پاک می‌شود",
+                null, () -> {
+                    Api.delete("/providers/" + id, 20000, res -> {
+                        toast("حذف شد");
+                        loadCatalog();
+                    }, msg -> toast("حذف نشد: " + msg));
+                }), Ui.fill());
+        Sheet.show(this, label, box);
+    }
+
+    /** Model list of one provider, straight from the daemon's registry. */
+    private void chooseModel(String id) {
+        Api.get("/providers", 15000, res -> {
+            JSONArray rows = res.optJSONArray("providers");
+            LinearLayout box = Ui.col(this);
+            for (int i = 0; rows != null && i < rows.length(); i++) {
+                JSONObject p = rows.optJSONObject(i);
+                if (p == null || !id.equals(p.optString("id", ""))) {
+                    continue;
+                }
+                JSONArray models = p.optJSONArray("models");
+                for (int j = 0; models != null && j < models.length(); j++) {
+                    final String mid = models.optString(j, "");
+                    if (mid.isEmpty()) {
+                        continue;
                     }
-                });
+                    boolean current = p.optBoolean("is_current_model", false)
+                            && j == 0;
+                    box.addView(Sheet.item(this, mid, current ? "مدل فعلی" : "",
+                            current ? Ui.ACCENT : null, () -> applyModel(id, mid)), Ui.fill());
+                    box.addView(Sheet.divider(this), Ui.fill());
+                }
+            }
+            Sheet.show(this, "مدل‌های " + id, box);
+        }, msg -> toast(msg));
     }
 
     private void addProviderDialog() {
@@ -1114,7 +1218,7 @@ public class MainActivity extends Activity {
                     }
                     lastSeq = 0;
                     messages.clear();
-                    adapter.notifyDataSetChanged();
+                    notifyList();
                     connect(true);
                 })
                 .setNegativeButton("لغو", null)

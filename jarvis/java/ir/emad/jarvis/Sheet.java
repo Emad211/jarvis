@@ -90,17 +90,82 @@ final class Sheet {
         });
     }
 
+    /**
+     * One rich row: optional status dot on the leading edge, a title, an optional second
+     * line of small text, and the chevron that says "this opens something". Used by every
+     * list where a bare label is not enough (providers with their reachability, skills with
+     * their use count, cron jobs with their next run).
+     */
+    static View item(Activity a, String title, String sub, Integer dotColor, Runnable tap) {
+        LinearLayout row = Ui.row(a);
+        row.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(Ui.dp(a, 18), Ui.dp(a, 13), Ui.dp(a, 18), Ui.dp(a, 13));
+        row.setBackground(Ui.ripple(a, null, Ui.ACCENT));
+        if (dotColor != null) {
+            View dot = new View(a);
+            dot.setBackground(Ui.round(a, dotColor, 4));
+            LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(Ui.dp(a, 8), Ui.dp(a, 8));
+            dl.setMarginEnd(Ui.dp(a, 12));
+            row.addView(dot, dl);
+        }
+        LinearLayout col = Ui.col(a);
+        // A Latin-only title ("River AI") resolves itself as LTR and then hugs the wrong
+        // edge of a Persian row; pin the view's direction so every row starts on the right.
+        TextView titleView = Ui.text(a, title, 14.5f, Ui.TEXT, false);
+        titleView.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+        titleView.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_START);
+        col.addView(titleView, Ui.fill());
+        if (sub != null && !sub.isEmpty()) {
+            col.addView(Ui.text(a, sub, 11.5f, Ui.FAINT, false),
+                    Ui.margins(Ui.fill(), a, 0, 3, 0, 0));
+        }
+        row.addView(col, Ui.weight(1f));
+        row.addView(chevron(a), new LinearLayout.LayoutParams(Ui.dp(a, 14), Ui.dp(a, 14)));
+        if (tap != null) {
+            row.setOnClickListener(v -> {
+                dismiss();
+                tap.run();
+            });
+        }
+        return row;
+    }
+
+    /** Disclosure arrow. In a right-to-left sheet it has to point left, so it is mirrored. */
+    private static View chevron(Activity a) {
+        Icon icon = new Icon(a, Icon.CHEVRON, Ui.FAINT);
+        icon.setScaleX(-1f);
+        return icon;
+    }
+
+    /** Hairline between rows, inset like the text so the list reads as one column. */
+    static View divider(Activity a) {
+        View line = new View(a);
+        line.setBackgroundColor(Ui.alpha(Ui.STROKE, 200));
+        return line;
+    }
+
+    /** Small caps-ish label that groups the rows under it. */
+    static View section(Activity a, String text) {
+        TextView t = Ui.text(a, text, 11f, Ui.FAINT, true);
+        t.setPadding(Ui.dp(a, 18), Ui.dp(a, 16), Ui.dp(a, 18), Ui.dp(a, 6));
+        return t;
+    }
+
     /** A list of tappable rows in a sheet; the sheet closes after a pick. */
     static void rows(Activity a, String title, List<String> labels, Pick pick) {
         LinearLayout box = Ui.col(a);
         for (int i = 0; i < labels.size(); i++) {
             final int index = i;
             LinearLayout row = Ui.row(a);
+            row.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
             row.setPadding(Ui.dp(a, 18), Ui.dp(a, 15), Ui.dp(a, 18), Ui.dp(a, 15));
             row.setBackground(Ui.ripple(a, null, Ui.ACCENT));
-            row.addView(Ui.text(a, labels.get(i), 14.5f, Ui.TEXT, false), Ui.weight(1f));
-            row.addView(new Icon(a, Icon.CHEVRON, Ui.FAINT),
-                    new LinearLayout.LayoutParams(Ui.dp(a, 14), Ui.dp(a, 14)));
+            TextView labelView = Ui.text(a, labels.get(i), 14.5f, Ui.TEXT, false);
+            labelView.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+            labelView.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_START);
+            row.addView(labelView, Ui.weight(1f));
+            row.addView(chevron(a), new LinearLayout.LayoutParams(Ui.dp(a, 14), Ui.dp(a, 14)));
             row.setOnClickListener(v -> {
                 dismiss();
                 pick.on(index);
