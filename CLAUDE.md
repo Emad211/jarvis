@@ -19,23 +19,37 @@ One repo for both halves of the system. Background history: `../hermes-handoff/H
 
 ## Phone runtime
 - `hermes-svc` supervises everything in tmux + restart loops: `gwctl` (:8777), `jarvis`
-  (`jarvisd`, the console's agent on :8780), `agy` (:8790), `router` (OmniRoute :20128, if
-  installed). The Hermes **messaging gateway is gone**: the Telegram bot was deleted on
-  2026-10-26 together with its token, its `platforms.telegram` / `telegram:` config blocks, the
-  `tgwatch` + `telegram-heal` restart machinery and the per-profile `gw-<profile>` gateways.
+  (`jarvisd`, the console's agent on :8780), `agy` (:8790), `cron`, and `router` (OmniRoute
+  :20128, if installed). The Hermes **messaging gateway is gone**: the Telegram bot was deleted
+  on 2026-10-26 together with its token, its `platforms.telegram` / `telegram:` config blocks,
+  the `tgwatch` + `telegram-heal` restart machinery and the per-profile `gw-<profile>` gateways.
   The console is the only interface; boot runs `hermes-svc boot`.
+- `cron` exists because cron used to be ticked by the gateway: the unit runs
+  `hermes cron tick` every 55 s. `hermes cron status` still claims "gateway is not running, cron
+  jobs will NOT fire" — that is its own heuristic and it is now wrong; trust `hermes-svc list`
+  plus `hermes cron runs` (a real job has fired with `last_status=ok`).
 - `jarvisd` keeps a **warm in-process `AIAgent`** per session. Measured on this phone
   (2026-10-26): warm turn ≈ 1.8–4 s to first token, `hermes -z` ≈ 13–120 s, cold
   `AIAgent()` ≈ 24 s. Never route chat through `/agent/test` or a fresh `hermes -z`.
+- Feature modules sit beside `jarvisd.py` and are loaded through a guarded `register(app, ctx)`
+  loop — a broken module is logged and skipped, never fatal: `jarvisd_personas.py` (personas +
+  per-session binding), `jarvisd_tools.py` (skills, curator, memory, MCP, plugins, cron),
+  `jarvisd_ops.py` (services, restart whitelist, logs), `jarvisd_voice.py` (all of `/voice/*`).
+  They must import `Request`/`JSONResponse` at **module** level: with `from __future__ import
+  annotations`, a runtime-local import makes FastAPI treat request bodies as query params.
+- Voice, measured 2026-10-26 over the phone's own network: STT `gemini-3.5-flash-lite` answers a
+  3 s Persian clip in 1.19–1.79 s with CER 0 (`gemini-3.5-transcribe` is more accurate but hits
+  the free-tier per-model daily 429), TTS takes 3.3–9.4 s depending on which model still has
+  quota — hence the fallback chain plus last-good-model stickiness. ElevenLabs is blocked from
+  this phone at the host level (403 before auth, on the Berlin exit), not a key problem.
 - Device actions do **not** go through the model: `jarvis_fast.py` runs 16 intents over
   loopback adb (~92 ms/call vs `rish`'s 3 s) and `jarvis_fast.route()` maps plain Persian
   commands onto them ("تنظیمات رو باز کن" → 613 ms end to end). The agent gets the same hands
   through the `jarvis-fast` CLI + `~/.hermes/skills/mobile/jarvis-fast/SKILL.md`.
-- Hermes also ships an OpenAI-compatible API server (`gateway/platforms/api_server.py`,
-  `platforms.api_server.enabled`, key `API_SERVER_KEY`, port 8642). `platforms.api_server` is
-  still enabled in config, but **nothing serves :8642**: it only ever ran inside the gateway,
-  which is no longer started. `docs/hermes-embedding-api.md` has the measured numbers and the
-  cold-start caveat if it is ever brought back with `hermes gateway`.
+- Hermes also ships an OpenAI-compatible API server (`gateway/platforms/api_server.py`, key
+  `API_SERVER_KEY`, port 8642). It is **unset and inert** here: it only ever ran inside the
+  gateway, which no longer starts. `docs/hermes-embedding-api.md` has the measured numbers and
+  the cold-start caveat if it is ever brought back with `hermes gateway`.
 - gwctl v3 API is documented in its docstring; most endpoints take `?profile=`.
 - Device control goes through Shizuku `rish` (uid 2000, not root). The `phone-*` helpers source
   `phone-env`, which sets `RISH_APPLICATION_ID=com.termux`.
