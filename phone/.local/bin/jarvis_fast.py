@@ -89,6 +89,10 @@ def bridge(intent: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not pkg:
             return None
         payload["args"] = {"package": pkg}
+    if intent == "notifications":
+        # reuse the global-action lane that already works instead of waiting for an APK update
+        payload["intent"] = "key"
+        payload["args"] = {"name": "notifications"}
     if intent == "clipboard":
         # the bridge has two separate actions; the intent here is one with optional text
         payload["intent"] = "clipboard_set" if str(args.get("text") or "") else "clipboard_get"

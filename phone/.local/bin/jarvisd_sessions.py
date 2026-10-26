@@ -119,6 +119,19 @@ def _live(ctx) -> List[Dict[str, Any]]:
     return rows
 
 
+def _busy(ctx, sid: str) -> bool:
+    """True while a turn is running: deleting that session would make the daemon write its
+    answer into a file nobody will read again, so this is refused even with `force`."""
+    hub = _hub()
+    if hub is None:
+        return False
+    try:
+        session = hub.get(sid)
+        return bool(getattr(session, "busy", False)) if session is not None else False
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _drop(ctx, sid: str, keep_file: bool = False) -> Dict[str, Any]:
     """Remove one session from HUB and from disk. Returns {removed_hub, removed_file}."""
     removed_hub = False
@@ -172,11 +185,10 @@ def register(app, ctx):  # noqa: C901
         return data if isinstance(data, dict) else {}
 
     def why_protected(sid: str, rows: List[Dict[str, Any]], newest: str) -> str:
+        if _busy(ctx, sid):
+            return "busy: a turn is running"
         if sid in _bound_sessions(ctx):
             return "bound to a bot in the console"
-        row = next((r for r in rows if r["id"] == sid), None)
-        if row and row["busy"]:
-            return "busy: a turn is running"
         if sid == newest:
             return "most recent session (the console reopens it)"
         return ""
@@ -189,10 +201,11 @@ def register(app, ctx):  # noqa: C901
         known = {r["id"] for r in rows}
         if sid not in known:
             return err("not_found", sid, 404)
+        if _busy(ctx, sid):
+            return err("busy", "%s is running a turn; cancel it first" % sid, 409)
         newest = rows[0]["id"] if rows else ""
         reason = why_protected(sid, rows, newest)
-        protected = bool(reason)
-        if protected and not force:
+        if reason and not force:
             return err("protected", "%s: %s" % (sid, reason), 409)
         result = _drop(ctx, sid)
         if not result["removed_hub"] and not result["removed_file"]:
@@ -211,8 +224,10 @@ def register(app, ctx):  # noqa: C901
             keep = int(data.get("keep", 10))
         except (TypeError, ValueError):
             return err("bad_keep", "keep must be an integer")
-        if keep < 0:
-            return err("bad_keep", "keep must be >= 0")
+        if keep < 1:
+            return err("bad_keep", "keep must be >= 1: the console's current session is the "
+                                   "most recent one, so a prune that keeps nothing would "
+                                   "pull it out from under the app")
         keep = min(keep, 500)
         force = bool(data.get("force"))
         rows = _live(ctx)
@@ -222,6 +237,9 @@ def register(app, ctx):  # noqa: C901
         skipped: List[Dict[str, str]] = []
         for row in rows[keep:]:
             sid = row["id"]
+            if _busy(ctx, sid):
+                skipped.append({"id": sid, "reason": "busy: a turn is running"})
+                continue
             reason = why_protected(sid, rows, newest)
             if reason and not force:
                 skipped.append({"id": sid, "reason": reason})

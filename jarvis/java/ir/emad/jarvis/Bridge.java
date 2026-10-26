@@ -244,6 +244,10 @@ final class Bridge {
                     out.put("ok", a11y != null && a11y.global(args.optString("name")));
                     break;
                 }
+                case "notifications": {
+                    out.put("ok", a11y != null && a11y.global("notifications"));
+                    break;
+                }
                 case "type": {
                     out.put("ok", a11y != null && a11y.type(args.optString("text")));
                     break;
