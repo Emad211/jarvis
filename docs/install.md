@@ -1,6 +1,6 @@
 # نصب جارویس
 
-> **قبل از انتشار:** در این فایل یک جای خالی هست — `<REPO_URL>` (آدرس مخزن). بقیه آماده است.
+مخزن: **https://github.com/Emad211/jarvis**
 
 جارویس دو تکه است: یک **اپ اندروید** (`ir.emad.jarvis`) و یک **دیمن روی همان گوشی**
 (`jarvisd` روی `127.0.0.1:8780`). دیمن، خودِ عامل Hermes را داخل گوشی گرم نگه می‌دارد؛
@@ -28,7 +28,7 @@
 گوشی را به همان Wi‑Fi لپ‌تاپ وصل کن، در Termux یک‌بار `sshd` را روشن بگذار، بعد:
 
 ```bash
-git clone <REPO_URL> ~/hermes-control && cd ~/hermes-control
+git clone https://github.com/Emad211/jarvis ~/hermes-control && cd ~/hermes-control
 bash install.sh
 ```
 
@@ -60,7 +60,7 @@ bash install.sh --no-build       # همان jarvis/dist/jarvis.apk موجود ر
 
 ```bash
 pkg install -y git
-git clone <REPO_URL> ~/hermes-control
+git clone https://github.com/Emad211/jarvis ~/hermes-control
 sh ~/hermes-control/phone/.local/bin/jarvis-install
 ```
 

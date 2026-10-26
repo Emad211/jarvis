@@ -87,6 +87,17 @@ arguments, so the script passes `C:/…` paths itself. Build from PowerShell, no
 - `jarvisd` and gwctl are loopback-only, no auth by design (same trust model). Do not add a
   second listener on a non-loopback address without a token.
 
+## Git
+- Remote: `https://github.com/Emad211/jarvis` (branch `master`). That URL is what `docs/install.md`
+  and the installer tell a stranger to clone.
+- Push with `pwsh -File pc/push.ps1 [-Message "…"]`. It exists because two things are broken on
+  this host: Windows' schannel cannot acquire a credential handle in the sandbox (every git call
+  needs `-c http.sslBackend=openssl`), and git's askpass is a shell script while MSYS bash cannot
+  start here. The script injects the token through a temporary remote URL and restores the clean
+  URL afterwards, so `.git/config` never holds a secret.
+- The token lives at `%USERPROFILE%\.hermes-secrets\github.token` (ACL: this user only). **Never
+  copy it into the repo, a commit, a log line or a chat message.**
+
 ## Accepting a change to the console
 ```powershell
 pwsh -File jarvis\build.ps1 -Install
