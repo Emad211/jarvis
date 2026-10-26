@@ -439,7 +439,7 @@ the row replaces the old toast; a toast for a failed API test is how a key silen
      │  │  │ 0.1 · ۳ گفتگو · warm                ││  │  11sp Mono TEXT_3
      │  │  └─────────────────────────────────────┘│  │
      │  │  ┌─────────────────────────────────────┐│  │
-     │  │  │ (وصل)            ● گیتوی (Telegram) ││  │  OK / WARN «نیاز به توجه»
+     │  │  │ (وصل)          ● استک (gwctl 8777) ││  │  OK / WARN «نیاز به توجه»
      │  │  │ google_ai_studio/gemini-3.5-flash   ││  │  11sp Mono, oneLine …
      │  │  │ ۲ ساعت ۱۴ دقیقه بالا                ││  │  Persian digits
      │  │  └─────────────────────────────────────┘│  │
@@ -450,9 +450,7 @@ the row replaces the old toast; a toast for a failed API test is how a key silen
      │  │  ├┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┤│  │
      │  │  │ ⟳ ✕         در حال اجرا   ● jarvis  ││  │
      │  │  ├┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┤│  │
-     │  │  │ ⟳ ✕         متوقف          ○ gw      ││  │  BAD dot
-     │  │  ├┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┤│  │
-     │  │  │ ⟳ ✕         در حال اجرا   ○ tgwatch ││  │
+     │  │  │ ⟳ ✕         متوقف          ○ agy     ││  │  BAD dot
      │  │  └─────────────────────────────────────┘│  │
      │  │   آخرین بررسی: همین حالا · gwctl 8777   │  │  11sp Mono TEXT_3
      │  ╰─────────────────────────────────────────╯  │
@@ -460,7 +458,7 @@ the row replaces the old toast; a toast for a failed API test is how a key silen
 
 Data sources (no daemon change needed): jarvisd `GET /health` → `{ok, version, warm, sessions}`;
 gwctl `GET http://127.0.0.1:8777/services` → `{services:[{name,running}]}`; gwctl
-`GET /status?profile=` → `{overall, telegram, model, uptime_seconds, needs_attention}`. The app
+`GET /status?profile=` → `{overall, health, needs_attention, stopped, model, uptime_seconds}`. The app
 needs one extra preference, `gwctl_base` (default `http://127.0.0.1:8777`) — additive, no new
 listener, loopback only. `⟳` = restart (`POST /services/action {name,action:"restart"}`), `✕` =
 stop, and **stop asks first** through the same sheet with a confirm row (destructive ⇒ a second
@@ -798,7 +796,7 @@ activity transitions, haptics. No `ObjectAnimator` loops other than #1; stop it 
    R_SHEET)`, the title/button typefaces to Vazirmatn, button colours to ACCENT/BAD, and
    `d.getWindow().setLayout(MATCH_PARENT, WRAP_CONTENT)`.
 9. **`EditText` direction.** With `FIRSTSTRONG_LTR` the caret flips sides as soon as you type a
-   Latin word ("open telegram"), which reads as a glitch. Use `TEXT_DIRECTION_LOCALE` for the chat
+   Latin word ("open settings"), which reads as a glitch. Use `TEXT_DIRECTION_LOCALE` for the chat
    input, `TEXT_DIRECTION_LTR` for key/URL fields, and never `TEXT_DIRECTION_RTL` on a field that
    accepts machine strings.
 10. **Persian digits in an LTR context** still render as Persian shapes but take Latin advance

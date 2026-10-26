@@ -20,20 +20,22 @@ One repo for both halves of the system. Background history: `../hermes-handoff/H
 ## Phone runtime
 - `hermes-svc` supervises everything in tmux + restart loops: `gwctl` (:8777), `jarvis`
   (`jarvisd`, the console's agent on :8780), `agy` (:8790), `router` (OmniRoute :20128, if
-  installed), `gw` (gateway), `tgwatch` (restarts a gateway whose Telegram gave up after a VPN
-  drop), `gw-<profile>` (one gateway per Hermes profile that has its own bot token).
-  Boot runs `hermes-svc boot`.
+  installed). The Hermes **messaging gateway is gone**: the Telegram bot was deleted on
+  2026-10-26 together with its token, its `platforms.telegram` / `telegram:` config blocks, the
+  `tgwatch` + `telegram-heal` restart machinery and the per-profile `gw-<profile>` gateways.
+  The console is the only interface; boot runs `hermes-svc boot`.
 - `jarvisd` keeps a **warm in-process `AIAgent`** per session. Measured on this phone
   (2026-10-26): warm turn ≈ 1.8–4 s to first token, `hermes -z` ≈ 13–120 s, cold
   `AIAgent()` ≈ 24 s. Never route chat through `/agent/test` or a fresh `hermes -z`.
 - Device actions do **not** go through the model: `jarvis_fast.py` runs 16 intents over
   loopback adb (~92 ms/call vs `rish`'s 3 s) and `jarvis_fast.route()` maps plain Persian
-  commands onto them ("تلگرام رو باز کن" → 613 ms end to end). The agent gets the same hands
+  commands onto them ("تنظیمات رو باز کن" → 613 ms end to end). The agent gets the same hands
   through the `jarvis-fast` CLI + `~/.hermes/skills/mobile/jarvis-fast/SKILL.md`.
 - Hermes also ships an OpenAI-compatible API server (`gateway/platforms/api_server.py`,
-  `platforms.api_server.enabled`, key `API_SERVER_KEY`, port 8642) with `/v1/runs` + SSE +
-  approvals. It works here, but each run rebuilds an agent and the first one after a gateway
-  restart pays the cold-start cliff — `docs/hermes-embedding-api.md` has the numbers.
+  `platforms.api_server.enabled`, key `API_SERVER_KEY`, port 8642). `platforms.api_server` is
+  still enabled in config, but **nothing serves :8642**: it only ever ran inside the gateway,
+  which is no longer started. `docs/hermes-embedding-api.md` has the measured numbers and the
+  cold-start caveat if it is ever brought back with `hermes gateway`.
 - gwctl v3 API is documented in its docstring; most endpoints take `?profile=`.
 - Device control goes through Shizuku `rish` (uid 2000, not root). The `phone-*` helpers source
   `phone-env`, which sets `RISH_APPLICATION_ID=com.termux`.
@@ -57,10 +59,10 @@ arguments, so `build.sh` passes `C:/…` paths (`cygpath -m`). With adb from git
 ## Rules
 - Reply to the user in Persian, short and direct; act instead of instructing; verify before claiming.
 - Never bind gwctl beyond 127.0.0.1. Watchdog stays a JobScheduler job (no foreground service).
-- Never launch the gateway with bare `nohup`; use `hermes-svc`.
+- Never launch a supervised service with bare `nohup`; use `hermes-svc`.
 - Keep `allow-external-apps=true` in `~/.termux/termux.properties` (the app's wake button needs it).
-- TTS: Telegram stays `eleven_v4_turbo` (multilingual_v2 has no Persian); the console uses
-  Gemini TTS (`tts.provider: gemini`) because the ElevenLabs key answers 403 from this phone.
+- TTS: the console uses Gemini TTS (`tts.provider: gemini`) because the ElevenLabs key
+  answers 403 from this phone (`eleven_v4_turbo` stays the model if ElevenLabs is ever used).
 - Phone scripts must keep LF line endings (`.gitattributes` enforces it).
 - `jarvisd` and gwctl are loopback-only, no auth by design (same trust model). Do not add a
   second listener on a non-loopback address without a token.

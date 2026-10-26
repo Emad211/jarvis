@@ -9,12 +9,12 @@ Most endpoints accept ?profile=<name> (default profile when omitted).
 
     GET  /ping                     liveness
     GET  /version                  gwctl + hermes versions
-    GET  /status                   gateway health, telegram, model, uptime, log tail
+    GET  /status                   runtime health (jarvisd), model, uptime, log tail
     GET  /overview                 status of every profile + every service, in one call
     GET  /system                   battery, memory, storage, load
     GET  /services                 supervised services (hermes-svc) and their state
     POST /services/action          {name, action: start|stop|restart}
-    GET  /profiles                 Hermes profiles with model + bot state
+    GET  /profiles                 Hermes profiles with model + persona line
     GET  /config                   redacted config + editable field schema
     POST /config/set               {key, value}         (via `hermes config set`)
     GET  /models                   configured + fallback chain + live model list
@@ -30,13 +30,14 @@ Most endpoints accept ?profile=<name> (default profile when omitted).
     POST /env/set                  {name, value}   only *_API_KEY / *_TOKEN names
     GET  /logs?file=&lines=&filter=
     GET  /logs/files
-    GET  /checks                   reachability: providers, telegram, VPN, bridge, router
+    GET  /checks                   reachability: providers, VPN, jarvisd, bridge, router
     GET  /cron                     scheduled jobs
     POST /cron/action              {id, action: run|pause|resume}
     POST /agent/test               {prompt?}  end-to-end `hermes -z` round trip
-    POST /send                     {text, target?}  message via `hermes send` (no LLM)
-    POST /gateway/restart          restart this profile's gateway
-    POST /gateway/stop             stop it
+    POST /send                     {text, target?}  no messaging platform is configured any
+                                   more: the route stays so old clients get a readable answer
+    POST /gateway/restart          restart the console agent (jarvisd); legacy route name
+    POST /gateway/stop             stop it (legacy route name)
 """
 from __future__ import annotations
 
@@ -44,7 +45,6 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import threading
 import time
@@ -61,6 +61,8 @@ PREFIX = "/data/data/com.termux/files/usr"
 HERMES_BIN = os.path.join(PREFIX, "bin", "hermes")
 SVC = os.path.join(HOME, ".local", "bin", "hermes-svc")
 PORT = int(os.environ.get("GWCTL_PORT", "8777"))
+AGENT_PORT = 8780            # jarvisd, the console's agent
+AGENT_SVC = "jarvis"         # the hermes-svc unit that supervises jarvisd
 API_VERSION = 3
 VERSION = "3.0"
 
@@ -211,22 +213,26 @@ def _argv(pid):
         return []
 
 
-def _is_gateway(argv, profile):
-    """A real gateway process, not the tmux/shell wrapper whose -c string mentions it."""
+def _is_agent(argv):
+    """The jarvisd process itself, not the tmux/shell wrapper whose -c string mentions it."""
     if not argv or os.path.basename(argv[0]) in ("sh", "bash", "tmux", "dash"):
         return False
-    if "gateway" not in argv or "run" not in argv:
-        return False
-    named = argv[argv.index("-p") + 1] if "-p" in argv[:-1] else "default"
-    return named == (profile or "default")
+    return any(os.path.basename(a) == "jarvisd.py" for a in argv)
 
 
-def gateway_pids(profile=None):
-    state = read_json(os.path.join(home_of(profile), "gateway_state.json"))
-    recorded = str(state.get("pid") or "")
-    if recorded.isdigit() and _is_gateway(_argv(recorded), profile):
-        return [recorded]
-    return [e for e in os.listdir("/proc") if e.isdigit() and _is_gateway(_argv(e), profile)]
+def agent_pids():
+    return [e for e in os.listdir("/proc") if e.isdigit() and _is_agent(_argv(e))]
+
+
+def agent_health(timeout=4):
+    """jarvisd's own /health, or None when it is not answering."""
+    status, raw, _ms = http_json(f"http://127.0.0.1:{AGENT_PORT}/health", timeout=timeout)
+    if status != 200:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def pid_uptime(pid):
@@ -242,13 +248,21 @@ def pid_rss(pid):
     return 0
 
 
-def services():
+_SERVICES_CACHE = {"at": 0.0, "rows": []}
+
+
+def services(max_age=5):
+    """`hermes-svc list` as [{name, running}]. Cached for a few seconds: /status is polled
+    every couple of seconds and each call would otherwise fork four tmux lookups."""
+    if _SERVICES_CACHE["rows"] and time.time() - _SERVICES_CACHE["at"] < max_age:
+        return _SERVICES_CACHE["rows"]
     code, out = run(["sh", SVC, "list"], timeout=20)
     rows = []
     for line in out.splitlines():
         parts = line.split()
         if len(parts) == 2:
             rows.append({"name": parts[0], "running": parts[1] == "running"})
+    _SERVICES_CACHE.update(at=time.time(), rows=rows)
     return rows
 
 
@@ -258,7 +272,7 @@ def service_action(name, action):
     if not re.fullmatch(r"[a-z0-9_-]+", name or ""):
         return {"ok": False, "error": "bad service"}
     code, out = run(["sh", SVC, action, name], timeout=30)
-    return {"ok": code == 0, "output": out[-400:], "services": services()}
+    return {"ok": code == 0, "output": out[-400:], "services": services(0)}
 
 
 # ---------------------------------------------------------------------------
@@ -269,20 +283,18 @@ def current_model(cfg):
     return f"{m.get('provider', '')}/{m.get('default', '')}"
 
 
-def gateway_status(profile=None):
-    home = home_of(profile)
-    pids = gateway_pids(profile)
-    state = read_json(os.path.join(home, "gateway_state.json"))
-    tg = (state.get("platforms") or {}).get("telegram") or {}
-    tg_state = tg.get("state") or "unknown"
-    fresh = str(state.get("pid") or "") in pids
-    overall = "online" if pids and fresh else ("starting" if pids else "offline")
-    # After a VPN drop the gateway burns its 8 connect attempts and then stops retrying on
-    # its own: nothing in the process changes, so it looks "online" while Telegram is dead.
-    # hermes-svc's tgwatch restarts it; surface that so the app can say what is happening.
-    tgwatch = any(s.get("name") == "tgwatch" for s in services())
-    needs_attention = bool(tg.get("needs_attention")) or (
-        tg_state in ("retrying", "disconnected", "error") and tgwatch)
+def runtime_status(profile=None):
+    """Health of the stack this instance serves: jarvisd (:8780) + every supervised service.
+
+    There is no gateway and no messaging platform any more — the Jarvis console is the only
+    interface — so "online" means jarvisd answers its own /health. `needs_attention` is true
+    when any unit hermes-svc supervises is stopped; `stopped` names them.
+    """
+    home_of(profile)  # validate the profile up front
+    pids = agent_pids()
+    info = agent_health() if pids else None
+    stopped = [s["name"] for s in services() if not s["running"]]
+    overall = "online" if info and info.get("ok") else ("starting" if pids else "offline")
     try:
         model = current_model(load_config(profile))
     except Exception:  # noqa: BLE001
@@ -291,24 +303,24 @@ def gateway_status(profile=None):
     return {
         "profile": profile or "default",
         "overall": overall,
-        "health": "ok" if overall == "online" and tg_state == "connected" else overall,
+        "health": "ok" if overall == "online" and not stopped else (
+            "degraded" if overall == "online" else overall),
         "pid": pid,
         "pids": pids,
-        "telegram": tg_state,
-        "telegram_error": tg.get("error_message") or "",
-        "needs_attention": needs_attention,
-        "state_fresh": fresh,
+        "needs_attention": bool(stopped),
+        "stopped": stopped,
+        "state_fresh": bool(pids),
         "model": model,
-        "version": state.get("code_version") or "",
+        "version": (info or {}).get("version") or "",
         "uptime_seconds": pid_uptime(pid) if pid else None,
         "rss_kb": pid_rss(pid) if pid else 0,
-        "active_agents": state.get("active_agents") or 0,
+        "active_agents": (info or {}).get("active_agents") or 0,
         "checked_at": now(),
     }
 
 
 def log_tail(profile=None, lines=8):
-    text = read_text(os.path.join(home_of(profile), "gw-live.log"))
+    text = read_text(os.path.join(ROOT, "jarvis.log"))
     return [ln.rstrip() for ln in text.splitlines()[-lines:]]
 
 
@@ -323,39 +335,34 @@ def profile_names():
 def profiles_payload():
     out = []
     for name in profile_names():
-        st = gateway_status(name)
-        env = read_env(name)
+        st = runtime_status(name)
         soul = read_text(os.path.join(home_of(name), "SOUL.md")).strip().splitlines()
         out.append({"name": name, "model": st["model"], "overall": st["overall"],
-                    "telegram": st["telegram"], "has_bot": bool(env.get("TELEGRAM_BOT_TOKEN")),
-                    "soul": soul[0][:120] if soul else "", "service": "gw" if name == "default" else f"gw-{name}"})
+                    "soul": soul[0][:120] if soul else ""})
     return {"profiles": out}
 
 
-def svc_name(profile):
-    return "gw" if not profile or profile == "default" else f"gw-{profile}"
-
-
-def restart_gateway(profile=None, wait=40):
-    before = gateway_pids(profile)
-    code, out = run(["sh", SVC, "restart", svc_name(profile)], timeout=40)
+def restart_agent(profile=None, wait=40):
+    """Restart the console agent (the /gateway/* routes keep their old names for the app)."""
+    before = agent_pids()
+    code, out = run(["sh", SVC, "restart", AGENT_SVC], timeout=40)
     deadline, pids = time.time() + wait, []
     while time.time() < deadline:
         time.sleep(1.5)
-        pids = [p for p in gateway_pids(profile) if p not in before] or []
-        if pids:
+        pids = [p for p in agent_pids() if p not in before]
+        if pids and agent_health(timeout=3):
             break
     return {"started": bool(pids), "killed": before, "pids": pids, "exit_code": code,
-            "detail": out[-400:], "status": gateway_status(profile)}
+            "detail": out[-400:], "status": runtime_status(profile)}
 
 
-def stop_gateway(profile=None):
-    before = gateway_pids(profile)
-    run(["sh", SVC, "stop", svc_name(profile)], timeout=20)
-    for pid in gateway_pids(profile):
+def stop_agent(profile=None):
+    before = agent_pids()
+    run(["sh", SVC, "stop", AGENT_SVC], timeout=20)
+    for pid in agent_pids():
         run(["kill", "-TERM", pid], timeout=5)
     time.sleep(2)
-    return {"killed": before, "remaining": gateway_pids(profile), "status": gateway_status(profile)}
+    return {"killed": before, "remaining": agent_pids(), "status": runtime_status(profile)}
 
 
 # ---------------------------------------------------------------------------
@@ -373,8 +380,6 @@ FIELDS = [
 
     {"key": "approvals.mode", "label": "تأیید دستورهای خطرناک", "group": "دسترسی", "type": "enum",
      "options": ["off", "smart", "manual"]},
-    {"key": "telegram.require_mention", "label": "در گروه فقط با منشن جواب بده", "group": "دسترسی",
-     "type": "bool"},
 
     {"key": "streaming.enabled", "label": "استریم در چت", "group": "استریم", "type": "bool"},
     {"key": "streaming.edit_interval", "label": "فاصله به‌روزرسانی (ثانیه)", "group": "استریم",
@@ -679,13 +684,13 @@ def system_payload():
     }
 
 
-LOG_FILES = ["gw-live.log", "gwctl.log", "bridge.log", "router.log", "boot.log"]
+LOG_FILES = ["jarvis.log", "gwctl.log", "bridge.log", "router.log", "boot.log"]
 
 
 def logs_files(profile=None):
     out = []
     for name in LOG_FILES:
-        path = os.path.join(home_of(profile) if name == "gw-live.log" else ROOT, name)
+        path = os.path.join(ROOT, name)
         if os.path.exists(path):
             st = os.stat(path)
             out.append({"name": name, "size": st.st_size,
@@ -696,7 +701,7 @@ def logs_files(profile=None):
 def logs_tail(profile, name, lines, needle):
     if name not in LOG_FILES:
         return {"error": "unknown log", "lines": []}
-    path = os.path.join(home_of(profile) if name == "gw-live.log" else ROOT, name)
+    path = os.path.join(ROOT, name)
     try:
         with open(path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
@@ -754,8 +759,11 @@ def checks_payload(profile=None):
         tun = [n for n in out.split() if re.fullmatch(r"tun\d+|wg\w*|ppp\d+", n)]
         return (True, ", ".join(tun)) if tun else (False, "VPN روشن نیست")
 
-    def dns():
-        return True, "api.telegram.org → " + socket.gethostbyname("api.telegram.org")
+    def jarvis():
+        info = agent_health()
+        if not info:
+            return False, "پاسخ نمی‌دهد"
+        return True, f"warm={info.get('warm')} · sessions={info.get('sessions')}"
 
     def battery_opt():
         code, out = run(["rish", "-c", "dumpsys deviceidle whitelist"], timeout=15)
@@ -765,11 +773,7 @@ def checks_payload(profile=None):
         return not missing, "همه معاف" if not missing else "معاف نیست: " + ", ".join(missing)
 
     add("vpn", "VPN", vpn)
-    add("telegram", "Telegram API", reach("https://api.telegram.org/", good=(200, 302, 404)))
-    add("dns", "DNS تلگرام", dns)
-    st = gateway_status(profile)
-    results.append({"name": "telegram_bot", "label": "ربات تلگرام", "ok": st["telegram"] == "connected",
-                    "ms": 0, "detail": st["telegram_error"] or st["telegram"]})
+    add("jarvis", "عامل جارویس", jarvis)
     seen = {(cfg.get("model") or {}).get("provider")} | \
         {e.get("provider") for e in cfg.get("fallback_providers") or [] if isinstance(e, dict)}
     for p in sorted(x for x in seen if x):
@@ -806,14 +810,16 @@ def agent_test(profile, prompt):
 
 
 def send_message(profile, text, target):
+    # No messaging platform is configured any more. The route stays so an older client gets
+    # a readable answer instead of a 404.
     if not text:
         return {"ok": False, "error": "empty"}
-    code, out = hermes(profile, "send", "-t", target or "telegram", "--json", text, timeout=60)
-    return {"ok": code == 0, "detail": out[-300:]}
+    return {"ok": False,
+            "error": "no messaging platform configured — the Jarvis console is the interface"}
 
 
 def overview():
-    return {"profiles": [gateway_status(p) for p in profile_names()], "services": services(),
+    return {"profiles": [runtime_status(p) for p in profile_names()], "services": services(),
             "checked_at": now()}
 
 
@@ -824,17 +830,17 @@ GET_ROUTES = {
     "/ping": lambda q, p: {"ok": True, "api": API_VERSION},
     "/version": lambda q, p: {"api": API_VERSION, "gwctl": VERSION,
                               "hermes": (hermes(None, "--version", timeout=40)[1].splitlines() or [""])[0]},
-    "/status": lambda q, p: dict(gateway_status(p), log_tail=log_tail(p, 6), api=API_VERSION),
+    "/status": lambda q, p: dict(runtime_status(p), log_tail=log_tail(p, 6), api=API_VERSION),
     "/overview": lambda q, p: overview(),
     "/system": lambda q, p: system_payload(),
-    "/services": lambda q, p: {"services": services()},
+    "/services": lambda q, p: {"services": services(0)},
     "/profiles": lambda q, p: profiles_payload(),
     "/config": lambda q, p: config_snapshot(p),
     "/models": lambda q, p: models_payload(p),
     "/fallback": lambda q, p: {"fallback": load_config(p).get("fallback_providers") or []},
     "/keys": lambda q, p: keys_payload(p),
     "/logs/files": lambda q, p: {"files": logs_files(p)},
-    "/logs": lambda q, p: logs_tail(p, q.get("file", "gw-live.log"), q.get("lines", 150), q.get("filter", "")),
+    "/logs": lambda q, p: logs_tail(p, q.get("file", "jarvis.log"), q.get("lines", 150), q.get("filter", "")),
     "/checks": lambda q, p: checks_payload(p),
     "/cron": lambda q, p: cron_payload(p),
 }
@@ -853,8 +859,8 @@ POST_ROUTES = {
     "/cron/action": lambda b, p: cron_action(p, b.get("id"), b.get("action")),
     "/agent/test": lambda b, p: agent_test(p, b.get("prompt")),
     "/send": lambda b, p: send_message(p, b.get("text"), b.get("target")),
-    "/gateway/restart": lambda b, p: restart_gateway(p),
-    "/gateway/stop": lambda b, p: stop_gateway(p),
+    "/gateway/restart": lambda b, p: restart_agent(p),
+    "/gateway/stop": lambda b, p: stop_agent(p),
 }
 
 

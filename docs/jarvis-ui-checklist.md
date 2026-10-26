@@ -164,12 +164,12 @@ Rules for whoever executes this:
 
 - [ ] **22. `MainActivity.menu` → control sheet (services).**
   Replace the `menu` dialog with sheet (e): «اتصال» (jarvisd `/health`: warm/version/sessions),
-  «گیتوی» (gwctl `/status`: telegram state, model, uptime in Persian words), «سرویسهای hermes-svc»
+  «گیتوی» (gwctl `/status`: overall/health, stopped units, model, uptime in Persian words), «سرویسهای hermes-svc»
   (gwctl `/services`: dot + state word + 32dp restart/stop buttons; **stop asks with a confirm row**),
   «تازهسازی» text button, footer with the endpoint. Add `Api.gwctlBase` (default
   `http://127.0.0.1:8777`, pref `gwctl_base`) — loopback, no new listener. Needs `Icon.RELOAD`
   and `Icon.CLOSE` (spec §7.13).
-  *Done when:* a stopped `gw` service is visible and restartable without opening Termux.
+  *Done when:* a stopped `agy` service is visible and restartable without opening Termux.
 
 - [ ] **23. `MainActivity.settings` → rows inside the control sheet.**
   Base URL field (LTR, mono, radius 14) + TTS toggle row (trailing 8dp OK dot + «روشن/خاموش») +

@@ -621,7 +621,7 @@ Ordered by risk, not by effort. Each line is a concrete change in `jarvis_fast.p
   resolved components, in `~/.hermes/jarvis/cache/packages.json`, rebuilt at startup, on a miss, or
   after 24 h. Normalize both sides (lowercase, drop ZWNJ/spaces, `ي→ی`, `ك→ک`), then rank:
   exact alias → prefix → substring. Persian names come from a curated
-  `aliases: {"تلگرام":"org.telegram.messenger", …}` block in the same cache (auto-grown when an
+  `aliases: {"واتساپ":"com.whatsapp", …}` block in the same cache (auto-grown when an
   agent opens an app successfully — cheap learning loop, no labels API needed). Ambiguous → `409`
   with `error.candidates` so the app can show a chooser.
   **`--user 0` is mandatory, and exit codes lie.** Observed today, twice, 25 minutes apart, on the

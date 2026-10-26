@@ -1,7 +1,7 @@
 # Hermes Agent v0.20.6 — Embedding API Report for a Native Android Console
 
 **Scope.** How to drive Hermes Agent v0.20.6 (Termux/Android, `u0_a309`) from a native
-Android chat/agent console instead of Telegram, with <1 s perceived latency per command and
+Android chat/agent console as the sole interface, with <1 s perceived latency per command and
 live tool output. Every claim below carries a `file:line` reference. All measurements were
 taken **on the phone** on 2026-10-26 (Asia/Tehran) and are numbers, not impressions.
 
@@ -34,10 +34,12 @@ POST /v1/runs/{id}/steer|stop
 `<APP>/gateway/platforms/api_server.py:1-36` (module docstring; the run endpoints are listed
 at `:17-22`), route table at `<APP>/gateway/platforms/api_server.py:2214-2276`.
 
-It is **not enabled on this phone**: `~/.hermes/config.yaml:49-56` lists only `telegram`
-under `platforms:`, and `API_SERVER_KEY` is **ABSENT** from `~/.hermes/.env` (presence check
-only). The adapter refuses to start without a key (`api_server.py:8303`, guard at
-`api_server.py:8348-8369`). Enabling it is a config change plus a gateway restart.
+`platforms.api_server.enabled` is **true** in `~/.hermes/config.yaml` and `API_SERVER_KEY` is
+**present** in `~/.hermes/.env` (presence check only). The adapter refuses to start without a
+key (`api_server.py:8303`, guard at `api_server.py:8348-8369`), but nothing serves `:8642` now:
+the only process that ever hosted it was the messaging gateway, which is no longer run (the
+scripted bot that needed it was retired and deleted, so `hermes-svc` supervises only
+`gwctl`/`jarvis`/`agy`). Using `/v1/runs` again is a `hermes gateway` start, not a config change.
 
 **The decisive performance fact** is *not* the CLI-vs-in-process gap — it is that the cost is
 **once-per-process, not once-per-turn**:
@@ -219,7 +221,7 @@ into rate-limited platform edits:
 - Async side: `async def run(self)` (`:842`)
 
 **Caveat:** `GatewayStreamConsumer` is shaped around *editing an existing message* on a chat
-platform (Telegram/Discord/Slack), including flood-control backoff
+platform (Discord/Slack/WhatsApp), including flood-control backoff
 (`stream_consumer.py:1869-1875`), draft streaming (`:1929`), and overflow chunking (`:1511`).
 A native app should **not** adopt it; it should adopt the *event vocabulary* and the
 `/v1/runs` SSE encoding that already wraps it. That is precisely what `api_server` did.
@@ -314,7 +316,7 @@ its own history (that is how `/v1/chat/completions` stays stateless while
 **Practical rule for the app:** give the console its own `session_id` per conversation and
 drive all turns for that conversation through **one** long-lived process. If you must write
 from a second process, take the turn lease first, or you will reproduce #64934. Do not
-append to a session id that the Telegram gateway is currently running a turn on.
+append to a session id that a gateway is currently running a turn on.
 
 ---
 
@@ -376,7 +378,7 @@ with untrusted-content wrapping for `web_extract/web_search/browser_*/mcp_*`
 approval refusals, as a `{"approved": False, "message": "BLOCKED: …"}` tool result
 (`tools/approval.py:3795-3804`). There is no dedicated `tool.failed` event.
 
-### 3.3 The platform abstraction Telegram uses (`gateway/platforms/base.py`)
+### 3.3 The platform abstraction (`gateway/platforms/base.py`)
 
 `<APP>/gateway/platforms/base.py:2970` `class BasePlatformAdapter(ABC)`. The methods that
 shape a chat transport (signatures as declared):
@@ -414,8 +416,8 @@ includes `API_SERVER = "api_server"` (`gateway/config.py:346`) and it is listed 
 platform set (`config.py:439`). The **only** adapter in `gateway/platforms/` that turns this
 into a network request/response protocol is `api_server.py`; the others
 (`signal.py`, `webhook.py`, `whatsapp_cloud.py`, `weixin.py`, `bluebubbles.py`, `yuanbao.py`,
-`msgraph_webhook.py`) are chat providers. There is no Telegram file in that dir — Telegram is
-handled inside `gateway/run.py` (1.5 MB).
+`msgraph_webhook.py`) are chat providers. The messaging adapters that used to ship in that dir
+lived in bundled plugins (`plugins/platforms/*`) rather than in `gateway/run.py` (1.5 MB).
 
 > This is why the recommendation is "use `api_server`": it is the sanctioned,
 > platform-abstract-shaped HTTP transport, already wired to the same callbacks the console
@@ -745,8 +747,9 @@ Rejected alternatives, with reasons:
 
 The clincher is not features — it is §7.4. Any design that spawns a process per command pays
 24–120 s. A design with **one long-lived Python process holding warm agents** pays 2–3 s per
-turn. `api_server` *is* that long-lived process (it lives inside the gateway, which is
-already running: PID 30479, uptime 2627 s, Telegram connected).
+turn. `api_server` *is* that long-lived process (it lives inside the gateway; the measurement
+below was taken while that gateway was running: PID 30479, uptime 2627 s, its chat platform
+connected. The gateway is not started any more — `jarvisd` is the long-lived process now).
 
 ### 8.2 The concrete API surface to build against
 

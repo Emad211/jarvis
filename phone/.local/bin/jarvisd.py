@@ -145,6 +145,7 @@ class Session:
         self.agent = None
         self.model = ""
         self.reasoning = DEFAULT_REASONING
+        self.persona = ""
         self.messages: List[Dict[str, Any]] = []
         self.asks: Dict[str, Dict[str, Any]] = {}
         self.turn_seq = 0
@@ -178,7 +179,7 @@ class Session:
             data = {"id": self.id, "title": self.title, "created": self.created,
                     "updated": self.updated, "model": self.model,
                     "reasoning": self.reasoning, "turns": self.turn_seq,
-                    "messages": self.messages}
+                    "persona": self.persona, "messages": self.messages}
             tmp = self.path() + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, ensure_ascii=False)
@@ -198,6 +199,7 @@ class Session:
         s.updated = float(data.get("updated") or s.updated)
         s.model = str(data.get("model") or "")
         s.reasoning = str(data.get("reasoning") or DEFAULT_REASONING)
+        s.persona = str(data.get("persona") or "")
         s.turn_seq = int(data.get("turns") or 0)
         s.messages = data.get("messages") or []
         return s
@@ -250,6 +252,17 @@ def build_agent(session: Session, model: str, toolsets: List[str], reasoning: st
     """Construct (or rebuild) the warm agent for a session. Called inside the worker thread."""
     from run_agent import AIAgent
 
+    # A persona is a prompt layer on top of the base brief. Kept out of the base string so
+    # switching persona only costs one agent rebuild, not a rewrite of the daemon's identity.
+    brief = JARVIS_BRIEF
+    try:
+        import jarvisd_personas
+        extra = jarvisd_personas.persona_prompt(getattr(session, "persona", "") or "jarvis", CTX)
+        if extra:
+            brief = brief + "\n\n" + extra
+    except Exception as exc:  # noqa: BLE001
+        print("jarvisd: persona prompt skipped: %s" % exc, flush=True)
+
     def on_delta(d):
         if d:  # the runtime signals "stream closed" with an empty/None delta
             session.emit("text.delta", {"text": d})
@@ -294,7 +307,7 @@ def build_agent(session: Session, model: str, toolsets: List[str], reasoning: st
         verbose_logging=False,
         enabled_toolsets=toolsets or None,
         reasoning_config={"effort": reasoning} if reasoning else None,
-        ephemeral_system_prompt=JARVIS_BRIEF,
+        ephemeral_system_prompt=brief,
         session_id=session.id,
         platform="jarvis",
         user_id="emad",
@@ -522,7 +535,28 @@ app = FastAPI(title="jarvisd", version=VERSION)
 # logged and skipped, and the core chat path keeps working.
 CTX = {"HERMES": HERMES, "HOME": HOME, "JARVIS_DIR": os.path.join(HERMES, "jarvis"),
        "read_env": read_env, "hermes": lambda *a: _hermes(*a), "now": now, "jdump": jdump,
-       "notify": lambda m: print("jarvisd: %s" % m, flush=True)}
+       "notify": lambda m: print("jarvisd: %s" % m, flush=True),
+       "rebuild_session": lambda sid: _clear_agent(sid),
+       "set_persona": lambda sid, pid: _set_persona(sid, pid)}
+
+
+def _clear_agent(sid: str) -> bool:
+    """Drop a session's warm agent so the next turn rebuilds it (model, persona, tools)."""
+    s = HUB.get(sid)
+    if not s:
+        return False
+    s.agent = None
+    return True
+
+
+def _set_persona(sid: str, pid: str) -> bool:
+    s = HUB.get(sid)
+    if not s:
+        return False
+    s.persona = pid
+    s.agent = None
+    s.save()
+    return True
 for _mod_name in ("jarvisd_personas", "jarvisd_tools", "jarvisd_ops", "jarvisd_voice"):
     try:
         _mod = __import__(_mod_name)

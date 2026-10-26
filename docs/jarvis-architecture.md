@@ -29,13 +29,14 @@ Measured latency (free tier, quota available):
 Under a 429 storm (free tier exhausted by probing) any path degrades to tens of seconds;
 that is quota, not code. Billing in AI Studio is the only fix, and only Emad can do it.
 
-## Why a new app, not a Telegram bot
+## Why a new app, not a chat bot
 
-Telegram costs a network round-trip per message, cannot stream tool output, cannot show
-approval buttons with context, and dies whenever the VPN drops. The phone is the agent
-host; the interface should be a local client with direct access to the same process that
-runs the tools. Hermes Control (`ir.emad.hermesctl`) stays as the **health/supervisor**
-app; Jarvis (`ir.emad.jarvis`) is the **console**.
+A messaging bot costs a network round-trip per message, cannot stream tool output, cannot show
+approval buttons with context, and dies whenever the VPN drops — the chat bot that filled
+this role is retired and deleted. The phone is the agent host; the interface should be a
+local client with direct access to the same process that runs the tools. Hermes Control
+(`ir.emad.hermesctl`) stays as the **health/supervisor** app; Jarvis (`ir.emad.jarvis`) is
+the **console** and the only interface.
 
 ## Pieces
 
@@ -120,5 +121,5 @@ existing key. `docs/install.md` is the human-facing version.
 
 ## Non-goals for M1
 
-Telegram parity, group chat, file manager, code editor. Those come after the console is
+Remote/multi-device chat, group chat, file manager, code editor. Those come after the console is
 solid; the daemon API is designed so they are additive.

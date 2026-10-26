@@ -47,13 +47,11 @@ onboarding:
   seen:
     busy_input_prompt: true
 platforms:
-  telegram:
+  api_server:
     enabled: true
-    home_channel:
-      chat_id: '6961356707'
-      name: Emad Karimi
-      platform: telegram
-      user_id: '6961356707'
+    extra:
+      host: 127.0.0.1
+      port: 8642
 plugins:
   disabled: []
   enabled: []
@@ -237,6 +235,3 @@ fallback_providers:
     model: gemini-3.8-flash-high
 agent:
   reasoning_effort: xhigh
-telegram:
-  extra:
-    send_voice: true

@@ -25,7 +25,7 @@ echo
 echo "=== status core ==="
 curl -s --max-time 30 "$B/status" | python3 -c "
 import json,sys; d=json.load(sys.stdin)
-print('  overall:', d['overall'], '| tg:', d['telegram'], '| model:', d['model'])
+print('  overall:', d['overall'], '| health:', d['health'], '| stopped:', d.get('stopped'), '| model:', d['model'])
 print('  pid:', d['pid'], '| uptime:', d['uptime_seconds'], 's | ver:', d['version'])
 "
 
@@ -68,7 +68,7 @@ for c in json.load(sys.stdin)['checks']:
 
 echo
 echo "=== logs tail ==="
-curl -s --max-time 30 "$B/logs?file=gw-live.log&lines=2" | python3 -c "
+curl -s --max-time 30 "$B/logs?file=jarvis.log&lines=2" | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 print('  file:', d.get('file'), '| size:', d.get('size'), '| lines:', len(d.get('lines',[])))
 for l in d.get('lines',[])[-2:]: print('   ', l[:110])
