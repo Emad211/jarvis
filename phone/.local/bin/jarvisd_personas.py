@@ -102,6 +102,7 @@ BUILTINS: Dict[str, Dict[str, str]] = {
 }
 
 DEFAULT_ID = "jarvis"
+PROMPT_MAX = 4000  # chars per persona prompt; see _write()
 
 
 # --------------------------------------------------------------------------- storage --
@@ -156,6 +157,11 @@ def _read(ctx, pid: str) -> Optional[Dict[str, Any]]:
 
 def _write(ctx, pid: str, label: str, emoji: str, description: str, prompt: str) -> None:
     os.makedirs(_dir(ctx), exist_ok=True)
+    # The prompt rides in ephemeral_system_prompt on every call, so it competes for
+    # tokens with Hermes' own prompt: 4 KB (~700 Persian words) is the design budget.
+    if len(prompt) > PROMPT_MAX:
+        prompt = prompt[:PROMPT_MAX]
+        ctx["notify"]("personas: %s prompt truncated to %d chars" % (pid, PROMPT_MAX))
     path = _path(ctx, pid)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8", newline="\n") as fh:

@@ -480,6 +480,7 @@ def _plugin_rows(ctx, refresh: bool = False) -> List[Dict[str, Any]]:
 def _tool_rows(ctx) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     code, out = _run(ctx, "tools", "list", timeout=60)
+    mcp_tools = {row["name"]: row.get("tools") or [] for row in _mcp_rows(ctx)}
     kind, toolset = "agent", "builtin"
     for line in out.splitlines():
         stripped = line.strip()
@@ -490,6 +491,19 @@ def _tool_rows(ctx) -> List[Dict[str, Any]]:
             continue
         m = re.match(r"^([✓✗])\s+(enabled|disabled)\s+(\S+)\s*(.*)$", stripped)
         if not m:
+            # The MCP section is a different shape: "  <server>  all tools enabled".
+            m3 = re.match(r"^(\S{1,40})\s\s+(.+)$", stripped) if kind == "mcp" else None
+            if m3 and not stripped.startswith(("Name ", "─")):
+                server, text = m3.group(1), m3.group(2)
+                enabled = "disabled" not in text.lower()
+                allow = mcp_tools.get(server) or []
+                for tool in allow:
+                    rows.append({"id": "%s:%s" % (server, tool), "label": str(tool)[:80],
+                                 "toolset": "mcp", "kind": "mcp", "enabled": enabled})
+                if not allow:
+                    rows.append({"id": "mcp.%s" % server,
+                                 "label": _redact("%s: %s" % (server, text))[:80],
+                                 "toolset": "mcp", "kind": "mcp", "enabled": enabled})
             continue
         label = re.sub(r"^[^\w]+", "", m.group(4)).strip() or m.group(3)
         rows.append({"id": m.group(3), "label": label[:80], "toolset": toolset,
@@ -729,6 +743,15 @@ def register(app, ctx):  # noqa: C901
                 cfg["env"] = {str(k): str(v) for k, v in env_in.items()}
         # `hermes mcp add` is discovery-first and asks questions on stdin, so it is not
         # usable from a daemon; `config set` writes the same mcp_servers.<name> entry.
+        # That path skips Hermes' own pre-save guard against exfiltration-shaped stdio
+        # commands, so call the guard directly instead of losing it.
+        try:
+            from hermes_cli.mcp_config import validate_mcp_server_entry  # noqa: PLC0415
+            issues = validate_mcp_server_entry(name, cfg) or []
+        except Exception:  # noqa: BLE001  (guard moved/renamed: keep the shape checks only)
+            issues = []
+        if issues:
+            return err("rejected", _redact("; ".join(str(i) for i in issues[:3]))[:300])
         code, out = _run(ctx, "config", "set", "mcp_servers." + name,
                          json.dumps(cfg, ensure_ascii=False), timeout=45)
         if code != 0:

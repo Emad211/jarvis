@@ -1,5 +1,6 @@
 package ir.emad.jarvis;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
@@ -18,6 +19,10 @@ final class Api {
 
     interface Ok {
         void on(JSONObject body);
+    }
+
+    interface OkArray {
+        void on(JSONArray rows);
     }
 
     interface Fail {
@@ -66,6 +71,27 @@ final class Api {
         call("DELETE", path, null, timeoutMs, ok, fail);
     }
 
+    /**
+     * GET an endpoint whose body is a top-level JSON array (`/personas`, `/skills`, `/cron`,
+     * `/services`, `/mcp`, …). `JSONObject` cannot parse those, so they need their own path.
+     */
+    static void getArray(String path, int timeoutMs, OkArray ok, Fail fail) {
+        POOL.execute(() -> {
+            try {
+                String text = execText("GET", path, null, timeoutMs, null);
+                JSONArray rows = text.isEmpty() ? new JSONArray() : new JSONArray(text);
+                MainActivity.ui(() -> ok.on(rows));
+            } catch (Exception e) {
+                String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                MainActivity.ui(() -> {
+                    if (fail != null) {
+                        fail.on(msg);
+                    }
+                });
+            }
+        });
+    }
+
     private static void call(String method, String path, JSONObject payload, int timeoutMs,
                              Ok ok, Fail fail) {
         POOL.execute(() -> {
@@ -84,6 +110,12 @@ final class Api {
     }
 
     private static JSONObject exec(String method, String path, JSONObject payload, int timeoutMs,
+                                   String[] out) throws Exception {
+        String text = execText(method, path, payload, timeoutMs, out);
+        return text.isEmpty() ? new JSONObject() : new JSONObject(text);
+    }
+
+    private static String execText(String method, String path, JSONObject payload, int timeoutMs,
                                    String[] out) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(base + path).openConnection();
         try {
@@ -113,7 +145,7 @@ final class Api {
                 throw new Exception("HTTP " + code + " " + (detail.length() > 200
                         ? detail.substring(0, 200) : detail));
             }
-            return text.isEmpty() ? new JSONObject() : new JSONObject(text);
+            return text;
         } finally {
             c.disconnect();
         }

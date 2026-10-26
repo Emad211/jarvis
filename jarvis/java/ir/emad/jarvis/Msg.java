@@ -11,6 +11,19 @@ final class Msg {
     static final String NOTE = "note";
     static final String ACTION = "action";
 
+    /**
+     * Hermes writes its own transport failures into the answer stream as plain text
+     * ("API call failed after 3 retries …"). That is an internal diagnostic, not an answer:
+     * the transcript shows a short Persian card instead and keeps the first line as detail.
+     */
+    static boolean looksFailed(String t) {
+        if (t == null || t.isEmpty()) {
+            return false;
+        }
+        return t.startsWith("API call failed") || t.startsWith("❌ API failed")
+                || t.startsWith("⚠️") || t.contains("can't reach the model provider");
+    }
+
     final String role;
     final StringBuilder text = new StringBuilder();
     final List<ToolEv> tools = new ArrayList<>();

@@ -195,7 +195,35 @@ final class Ui {
         i.setBackground(ripple(ctx, round(ctx, alpha(color, 26), R_CHIP), color));
         i.setOnClickListener(l);
         i.setLayoutParams(new LinearLayout.LayoutParams(dp(ctx, 42), dp(ctx, 42)));
+        // An icon with no text is invisible to a screen reader and to any UI automation, so
+        // every glyph button carries the Persian word for what it does.
+        i.setContentDescription(glyphLabel(glyph));
         return i;
+    }
+
+    private static String glyphLabel(int glyph) {
+        switch (glyph) {
+            case Icon.MENU:
+                return "منو";
+            case Icon.PLUS:
+                return "گفتگوی تازه";
+            case Icon.SEND:
+                return "ارسال";
+            case Icon.STOP:
+                return "توقف";
+            case Icon.MIC:
+                return "ضبط صدا";
+            case Icon.MIC_OFF:
+                return "قطع ضبط";
+            case Icon.SPEAKER:
+                return "خواندن پاسخ";
+            case Icon.CLOSE:
+                return "بستن";
+            case Icon.CHECK:
+                return "تایید";
+            default:
+                return "دکمه";
+        }
     }
 
     static View dot(Context ctx, int color, float sizeDp) {

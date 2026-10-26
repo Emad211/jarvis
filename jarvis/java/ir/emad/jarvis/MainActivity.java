@@ -59,6 +59,8 @@ public class MainActivity extends Activity {
     private Thread sse;
     private boolean ttsOn;
     private String model = "";
+    /** Which persona this session runs on ("" = the daemon's default). */
+    private String persona = "";
     private String effort = "none";
     private String catalogJson = "";
     private long lastNotify;
@@ -304,6 +306,7 @@ public class MainActivity extends Activity {
                 modelChip.setText(ChatAdapter.shortModel(model));
             }
             effort = res.optString("reasoning", effort);
+            persona = res.optString("persona", "");
             notifyList();
             attachStream();
         }, msg -> {
@@ -662,6 +665,10 @@ public class MainActivity extends Activity {
         java.util.List<String> items = java.util.Arrays.asList(
                 "گفتگوی تازه",
                 "گفتگوهای قبلی",
+                "شخصیت‌ها",
+                "ابزارها و مهارت‌ها",
+                "زمان‌بندی",
+                "سرویس‌ها و لاگ‌ها",
                 "پرووایدرها و کلیدها",
                 "تنظیمات",
                 "راه‌اندازی اولیه",
@@ -676,15 +683,30 @@ public class MainActivity extends Activity {
                             sessionsDialog();
                             break;
                         case 2:
-                            providersDialog();
+                            Panels.personas(this, sessionId, persona, () -> {
+                                persona = "";
+                                openSession(sessionId);
+                            });
                             break;
                         case 3:
-                            settings();
+                            Panels.tools(this);
                             break;
                         case 4:
-                            setupWizard();
+                            Panels.cron(this);
                             break;
                         case 5:
+                            Panels.services(this);
+                            break;
+                        case 6:
+                            providersDialog();
+                            break;
+                        case 7:
+                            settings();
+                            break;
+                        case 8:
+                            setupWizard();
+                            break;
+                        case 9:
                             ttsOn = !ttsOn;
                             prefs.edit().putBoolean("tts", ttsOn).apply();
                             toast(ttsOn ? "صدا روشن شد" : "صدا خاموش شد");

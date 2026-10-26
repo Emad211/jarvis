@@ -70,6 +70,9 @@ final class ChatAdapter extends BaseAdapter {
             holder.addView(t, Ui.fill());
         } else if (Msg.ACTION.equals(m.role)) {
             holder.addView(actionCard(m));
+        } else if (Msg.looksFailed(m.text.toString())) {
+            holder.setGravity(Gravity.START);
+            holder.addView(failureCard(m), Ui.fill());
         } else {
             holder.setGravity(Gravity.START);
             holder.addView(answer(m));
@@ -79,6 +82,30 @@ final class ChatAdapter extends BaseAdapter {
             holder.setOnLongClickListener(onLong);
         }
         return holder;
+    }
+
+    /** A failed turn: one short Persian line, the machine detail kept but de-emphasised. */
+    private View failureCard(Msg m) {
+        LinearLayout card = Ui.col(ctx);
+        card.setPadding(Ui.dp(ctx, 14), Ui.dp(ctx, 12), Ui.dp(ctx, 14), Ui.dp(ctx, 12));
+        card.setBackground(Ui.round(ctx, Ui.SURFACE_2, Ui.R_CARD));
+        LinearLayout head = Ui.row(ctx);
+        head.addView(new Icon(ctx, Icon.WARN, Ui.RED),
+                new LinearLayout.LayoutParams(Ui.dp(ctx, 13), Ui.dp(ctx, 13)));
+        head.addView(Ui.text(ctx, "پاسخ نیامد", 12.5f, Ui.RED, true),
+                Ui.margins(Ui.wrap(), ctx, 6, 0, 0, 0));
+        card.addView(head);
+        card.addView(Ui.text(ctx, "پرووایدر جواب نداد. اتصال یا کلید را ببین، یا در «پرووایدرها» "
+                        + "گزینهٔ «بهترین را خودکار پیدا کن» را بزن.", 12.5f, Ui.DIM, false),
+                Ui.margins(Ui.fill(), ctx, 0, 6, 0, 0));
+        String raw = m.text.toString().split("\n")[0].trim();
+        int comma = raw.indexOf("      ");
+        if (comma > 0) {
+            raw = raw.substring(0, comma);
+        }
+        card.addView(Ui.mono(ctx, raw.length() > 120 ? raw.substring(0, 120) + "…" : raw,
+                        10f, Ui.FAINT), Ui.margins(Ui.fill(), ctx, 0, 6, 0, 0));
+        return card;
     }
 
     /** The answer itself: no bubble, a small role line, quiet metrics. */
@@ -96,7 +123,25 @@ final class ChatAdapter extends BaseAdapter {
             body.addView(toolCard(tool), Ui.margins(Ui.fill(), ctx, 0, 8, 0, 0));
         }
         TextView text = Ui.text(ctx, "", 15.5f, Ui.TEXT, false);
-        text.setText(Md.render(m.text.toString(), Ui.ACCENT, Ui.alpha(Ui.ACCENT, 22)));
+        String prose = m.text.toString();
+        // Agent-side tools report attachments as `MEDIA:/abs/path` lines. The app cannot open
+        // an arbitrary Termux path, so the answer shows the fact and drops the path.
+        StringBuilder cleaned = new StringBuilder();
+        int shots = 0;
+        for (String line : prose.split("\n")) {
+            if (line.trim().startsWith("MEDIA:")) {
+                shots++;
+                continue;
+            }
+            cleaned.append(line).append('\n');
+        }
+        if (shots > 0) {
+            prose = cleaned.toString().trim();
+            if (prose.isEmpty()) {
+                prose = shots == 1 ? "📷 تصویر گرفته شد." : "📷 " + shots + " تصویر.";
+            }
+        }
+        text.setText(Md.render(prose.trim(), Ui.ACCENT, Ui.alpha(Ui.ACCENT, 22)));
         text.setTextDirection(View.TEXT_DIRECTION_ANY_RTL);
         text.setTextIsSelectable(true);
         text.setLineSpacing(Ui.dp(ctx, 5), 1f);

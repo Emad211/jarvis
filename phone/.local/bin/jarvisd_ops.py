@@ -249,9 +249,14 @@ def register(app, ctx):  # noqa: C901
             ctx["notify"]("ops: jarvis restart scheduled by console")
             return {"ok": True, "restarting": True, "name": name, "detail": "restart in ~1s"}
         code, out = _run(ctx, ["hermes-svc", "restart", name], timeout=90)
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        detail = _redact(" | ".join(dict.fromkeys(lines)))[:300]
         ctx["notify"]("ops: restarted %s rc=%s" % (name, code))
-        return {"ok": code == 0, "name": name,
-                "detail": _redact(" ".join(out.split()))[:300]}
+        result: Dict[str, Any] = {"ok": code == 0, "name": name, "detail": detail}
+        if code != 0:
+            result["error"] = ("unsupported" if "not installed" in detail
+                               else "restart_failed")
+        return result
 
     @app.get("/logs")
     def logs(name: str = "jarvis", n: int = 200, grep: str = ""):
@@ -270,10 +275,10 @@ def register(app, ctx):  # noqa: C901
                 source = "tmux"
                 code, out = _run(ctx, ["tmux", "capture-pane", "-p", "-t", "=" + name,
                                        "-S", "-%d" % want], timeout=20)
+                if code != 0:  # "can't find pane: =nosuch" is a typo, not a log
+                    return err("not_found",
+                               "no log file and no tmux session for %s" % name, 404)
                 lines = out.splitlines()[-want:]
-                if code != 0 and not lines:
-                    return err("not_found", "no log file and no tmux session for %s" % name,
-                               404)
             lines = [_redact(ln.rstrip()) for ln in lines]
             needle = (grep or "").strip().lower()
             if needle:

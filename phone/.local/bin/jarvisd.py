@@ -1201,7 +1201,7 @@ def session_get(sid: str):
         return JSONResponse({"error": "no such session"}, status_code=404)
     return {"session": s.id, "title": s.title, "model": s.model or _default_model(),
             "reasoning": s.reasoning, "busy": s.busy, "messages": s.messages,
-            "seq": s.seq}
+            "persona": s.persona, "seq": s.seq}
 
 
 @app.post("/session/{sid}/turn")
