@@ -10,7 +10,7 @@ Path conventions used in citations:
 | Alias | Real path |
 |---|---|
 | `<APP>` | `/data/data/com.termux/files/usr/lib/hermes-agent/app` (Hermes Agent v0.20.6) |
-| `<JD>` | `phone/.local/bin/jarvisd.py` in this repo = `~/.local/bin/jarvisd.py` on the phone |
+| `<JD>` | `phone/.local/bin/jarvisd.py` (repo mirror). The live `~/.local/bin/jarvisd.py` on the phone is newer — it has `/fast` + `/media` + `chips`; those cites are written `jarvisd.py:NNN` |
 | `<BIN>` | `~/.local/bin/` on the phone (the `phone-*` helpers + `rish`) |
 | `<SKILLS>` | `~/.hermes/skills/` on the phone (18 categories, 89 `SKILL.md` files — counted today) |
 
@@ -20,7 +20,7 @@ test in `CLAUDE.md` (§"Accepting a change to the console") must still pass afte
 
 ---
 
-## 0. Two facts that decide both designs
+## 0. Four facts that decide both designs
 
 **(0.1) Hermes' own prompt is built once per session and frozen; the daemon's string is appended
 at every API call.** The system prompt is persisted per `session_id` in `state.db` and restored
@@ -40,7 +40,8 @@ replaces it.** Everything in Part A follows from that one line.
 
 **(0.2) The current daemon loses conversation history between turns.** `run_turn` calls
 `agent.run_conversation(user_message=text, task_id=…)` with no `conversation_history`
-(`<JD>:397`), and the turn loop starts from what the caller passed —
+(`<JD>:397`; identical in the live file on the phone, `~/.local/bin/jarvisd.py:413`), and the turn
+loop starts from what the caller passed —
 `messages = list(conversation_history) if conversation_history else []`
 (`<APP>/agent/turn_context.py:655`). Nothing reloads the DB for this path (the only automatic
 reload is the turn-lease/compaction path, `<APP>/run_agent.py:8740-8752`). The gateway — which
@@ -64,6 +65,17 @@ include_row_ids=True)` (`<APP>/hermes_state.py:11801-11807`, call pattern at
 The last two are *fixed* overhead, not cold-start: three consecutive `termux-battery-status`
 calls, 1 s apart, all cost ≈2.7 s. So the <300 ms fast path is **an adb path or nothing**;
 `rish` and `termux-api` are the slow lane and must be labelled as such in the API.
+
+**(0.4) Part B is already half-built on the phone — this document specifies the contract, not a
+greenfield build.** At 03:03 today `~/.local/bin/jarvis_fast.py` (24 212 B) landed with 16 intents,
+the same adb→rish ladder I measured (`_adb_ready`/`sh`, 30 s health cache, 600 s package cache), a
+`CHIPS` list and the deterministic Persian router `route()`; `jarvisd.py` already serves
+`POST /fast` (`:537-546`), `GET /media/<name>` (`:548-556`), `chips` inside `/catalog` (`:533`) and
+routes chat turns through `route()` into `run_fast_turn()` (`:784-821`), which emits
+`turn.start → tool.start → tool.end → text.delta → turn.end` with `mode:"fast"`. So §B is written as
+*the contract that code must satisfy plus the exact gaps* (§B3.1, and the three wire defects in
+§B2.2). `CLAUDE.md` now records ~92 ms per intent and 613 ms for «تلگرام رو باز کن» end to end; my
+own adb samples in (0.3) agree.
 
 ---
 
@@ -261,7 +273,7 @@ prompt (global SOUL + skills index + context files) is whatever that `session_id
 first turn. Document this in the UI: a divider reading *«شخصیت: کارگاه»* plus the persona's
 `banner`, not a claim that the agent was "reset".
 
-**History across a swap** requires A0.2 to be fixed in the same change: load
+**History across a swap** requires (0.2) to be fixed in the same change: load
 `get_messages_as_conversation(sid, repair_alternation=True, include_row_ids=True)` and pass it to
 `run_conversation(conversation_history=…)` on **every** turn — the gateway pattern
 (`<APP>/run_agent.py:8748-8752`). A rebuilt agent then continues the conversation exactly where
@@ -289,8 +301,7 @@ GET  /session/<sid>                  -> … + {persona:"kargah", toolsets:[…]}
 GET  /catalog                        -> … + personas:[{id,label,emoji,color,model,reasoning}]
 ```
 
-`GET /catalog` already ships a placeholder at `<JD>:517` (`"personas": [{"id": "jarvis", …}]`); it
-becomes the real list so the app's picker has one round trip at startup. Example:
+`GET /catalog` already ships a placeholder (`<JD>:517` in the mirror, `jarvisd.py:534` live) and `fast.CHIPS` at `:533`; the `personas` key becomes the real list so the app's picker has one round trip at startup. Example:
 
 ```json
 GET /personas
@@ -464,6 +475,12 @@ Process rules for the daemon:
 
 ### B2.1 `POST /fast`
 
+Live today: `jarvisd.py:537-546` takes `{intent, args}`, runs `fast.run(intent, args)` in an
+executor and returns its dict verbatim — so the *shape below is a superset*: `ok`, `intent`, `ms`,
+`detail`, `media` already exist; `verified`, `lane`, `slow`, `error`, `seq`, `card` are the additions
+(delta 1 in §B3.1). Note the live `detail` is a Persian sentence, not an object; that is the thing
+to change first, because `verified` cannot live in a string.
+
 ```json
 {"intent":"tap","args":{"x":540,"y":1200},"session":"9f2c1a8b3d4e","emit":true,"verify":false}
 ```
@@ -514,7 +531,7 @@ When `session` is present the daemon emits the **same** events an LLM tool call 
          "result":"{\"ok\": true, \"verified\": true, \"ms\": 291, \"lane\": \"adb\"}"}}
 ```
 
-Two wire details that matter, both verified in the app:
+Three wire details that matter, all verified in the app:
 
 1. The app reads `ev["data"]` and injects `_seq` from `ev["seq"]` (`Api.java:214-222`) — the daemon's
    envelope already provides both (`<JD>:148-159`, `:707-710`). Nothing new to invent.
@@ -522,40 +539,83 @@ Two wire details that matter, both verified in the app:
    `result.contains("\"ok\": false")` (`MainActivity.java:356-358`). Build the `result` string with
    `json.dumps` defaults (what `jdump` does, `<JD>:121-122`) so the space after the colon is
    present. FastAPI's compact `{"ok":false}` would **not** match and a failure would render green.
+3. **Live defect, same class.** The current `run_fast_turn()` emits
+   `"result": _short(res.get("detail"))` — the *detail string*, not the verdict object
+   (`jarvisd.py:813-814`). A failed fast action therefore arrives as e.g.
+   `"برنامه‌ای با این نام پیدا نشد: فلان"`, which contains no `"ok": false`, and the transcript
+   paints it as a **successful** card. Fix: put `jdump({ok, verified, ms, detail})` into `result`
+   and keep the human sentence in `text.delta` / the reply only. Until then, a chip action that
+   fails is indistinguishable from one that worked — the worst possible outcome for a feature whose
+   whole promise is determinism.
 
 ## B3. Intent catalogue
 
-Columns: **args** (schema) · **lane/command** (exact) · **p50** (measured or derived) ·
-**verify** (how success is proven) · **silent failure** (what exit code does *not* tell you).
+Columns: **args** · **lane/command** (exact) · **p50** (measured or derived) · **verify** (how
+success is proven) · **silent failure** (what the exit code does *not* tell you) · **live** (present
+in `~/.local/bin/jarvis_fast.py` today, or `new`).
 
-| # | intent | args | lane · command | p50 | verify | silent failure to detect |
+| intent | args | lane · command | p50 | verify | silent failure to detect | live |
 |---|---|---|---|---|---|---|
-| 1 | `tap` | `{x:int 0..width, y:int}` | adb · `input tap X Y` | 156 ms | `verify:true` → `ui_dump`/screenshot (slow) | always exit 0, even off-screen |
-| 2 | `long_press` | `{x,y,ms?:int 400..5000=800}` | adb · `input swipe X Y X Y MS` | 160 ms | as tap | same |
-| 3 | `swipe` | `{x1,y1,x2,y2,ms?:300}` or `{direction:up\|down\|left\|right}` | adb · `input swipe X1 Y1 X2 Y2 MS` | 160 ms | as tap | same |
-| 4 | `back` | `{}` | adb · `input keyevent 4` | 156 ms | none | exit 0 always |
-| 5 | `home` | `{}` | adb · `input keyevent 3` | 156 ms | `foreground` == launcher | exit 0 always |
-| 6 | `recents` | `{}` | adb · `input keyevent 187` | 156 ms | none | exit 0 always |
-| 7 | `key` | `{code?:int, name?:enum, longpress?:bool}` | adb · `input keyevent [--longpress] N` | 156 ms | none | **exit 0 for bogus codes** (verified with 9999) |
-| 8 | `type` | `{text:str, submit?:bool, verify?:bool}` | adb · `input text '…'` (ASCII) | 160 ms | `verify` → `ui_dump` (2–4 s) | non-ASCII chars dropped silently |
-| 9 | `type` (Persian) | `{text}` with a non-ASCII char | **termux-api** · `termux-clipboard-set` + `input keyevent 279` | **~2.95 s** | `ui_dump` | clipboard denied → paste is a no-op |
-| 10 | `open_app` | `{query:str, dry_run?:bool, verify?:bool}` | adb · `cmd package resolve-activity --brief -c android.intent.category.LAUNCHER <pkg>` → `am start -n <cmp>` | 109 + ~120 ms | `dumpsys window \| grep mCurrentFocus` (164 ms) | "No activity found" **with exit 0** |
-| 11 | `open_url` | `{url:str http(s)/tg/market}` | adb · `am start -a android.intent.action.VIEW -d '<url>'` | ~130 ms | stdout has `Starting:` | `Error:` on stdout, exit 0 (UNVERIFIED) |
-| 12 | `dial` | `{number:str, tel:bool=true}` | adb · `am start -a android.intent.action.DIAL -d tel:<num>` | ~130 ms | stdout | as above |
-| 13 | `foreground` | `{}` | adb · `dumpsys window \| grep -m1 mCurrentFocus` | 164 ms | — | stderr "Broken pipe" noise |
-| 14 | `volume` | `{direction:up\|down\|mute, steps?:1..10}` | adb · `input keyevent 24`×n / `25`×n / `164` | 156 ms + 60 ms/key | read-back (slow) | 164 is a **toggle**, not "mute" |
-| 15 | `media` | `{action:play\|pause\|play-pause\|next\|previous\|stop, verify?:bool}` | adb · `cmd media_session dispatch <action>` | 129 + ~130 ms | `cmd media_session list-sessions` non-empty | **no session → exit 0, no output** |
-| 16 | `brightness` | `{level?:0..255, percent?:0..100, auto?:bool}` | adb · `settings put system screen_brightness_mode 0` + `settings put system screen_brightness N` | 143 ms + write | read-back `settings get system screen_brightness` | adaptive brightness may reset mode to 1 |
-| 17 | `screenshot` | `{vision?:bool, question?:str}` | adb · `adb exec-out screencap -p` | **487 ms** (526 666 B) | PNG magic + size | screen off → blank frame, exit 0 |
-| 18 | `notifications_shade` | `{expand:bool, quick?:bool}` | adb · `cmd statusbar expand-notifications\|expand-settings\|collapse` | 131 ms | `dumpsys window \| grep -c NotificationShade` (UNVERIFIED string) | exit 0 when nothing happens |
-| 19 | `flashlight` | `{on:bool}` | **termux-api** · `termux-torch on\|off` | ~2.7 s | none reliable | app permission/slow lane only |
-| 20 | `screen_lock` | `{verify?:bool}` | adb · read `dumpsys power` → `input keyevent 223` | 90+156+90 ms | re-read `mWakefulness=Asleep` | sleep ≠ locked (auto-lock delay / Smart Lock) |
-| 21 | `wifi` | `{on:bool}` | adb · `cmd wifi set-wifi-enabled enabled\|disabled` | 129 ms + write | `cmd wifi status` | **turning Wi-Fi off can kill the adb lane** |
-| 22 | `clipboard` | `{op:get\|set, text?:str}` | **termux-api** · `termux-clipboard-get` / `termux-clipboard-set` | ~2.7 s | set: read back | `cmd clipboard` → *"No shell command implementation."* |
-| 23 | `info` | `{what:battery\|time\|storage\|uptime\|device}` | **in-process** (`/proc/uptime`, `statvfs`, `time.time()`); battery/screen via adb `dumpsys battery` | **<5 ms**; battery 134 ms | n/a (it *is* the read) | — |
-| 24 | `ui_dump` | `{query?:str, tap?:bool}` | adb · `uiautomator dump` + parse | **2–4 s (slow lane)** | the dump itself | not a fast intent — callers must not expect <300 ms |
+| `open_app` | `{name\|query:str, verify?:bool}` | adb · `cmd package resolve-activity --brief -c android.intent.category.LAUNCHER <pkg>` → `am start -n <cmp>` (live code uses `monkey -p <pkg> -c …LAUNCHER 1`) | 109 + ~120 ms | `foreground` (164 ms) | `No activity found` **with exit 0**; `monkey` prints `No activities found` | ✅ `open_app:191` |
+| `screenshot` | `{vision?:bool, question?:str}` | adb · `adb exec-out screencap -p` | **487 ms** (526 666 B) | PNG magic + size | screen off → valid but blank PNG, exit 0 | ✅ `screenshot()` |
+| `tap` | `{x,y, hold?:ms}` | adb · `input tap X Y`; `hold` → `input swipe X Y X Y MS` | 156 ms | `verify:true` → `ui`/screenshot (slow) | exit 0 even for off-screen coordinates | ✅ `tap:221` |
+| long-press | — folded into `tap{hold:800}` | adb · `input swipe X Y X Y MS` | 160 ms | as tap | same | ✅ `tap:229` |
+| `swipe` | `{x1,y1,x2,y2,ms?:300}` or direction | adb · `input swipe X1 Y1 X2 Y2 MS` | 160 ms | as tap | same | ✅ `swipe()` |
+| `key` | `{name:back\|home\|recents\|enter\|delete\|paste\|menu\|power\|notifications\|…, code?:int}` | adb · `input keyevent N` | 156 ms | `foreground` for `home` | **exit 0 for bogus codes** (verified: 9999) | ✅ `key:270` |
+| `type` | `{text:str, verify?:bool}` | adb · `input text '<ascii, spaces→%s>'` | 160 ms | `verify` → `ui` (2–4 s) | non-ASCII dropped silently; `'` stripped | ✅ `type_text:285` |
+| `type` (Persian) | `{text}` with any non-ASCII char | **termux-api** · `termux-clipboard-set` + `input keyevent 279` | **~2.95 s** | `ui` | denied clipboard → paste is a no-op | ✅ `type_text:294` |
+| `open_url` | `{url:http(s)\|tg\|market}` | adb · `am start -a android.intent.action.VIEW -d '<url>'` | ~130 ms | stdout `Starting:` | `Error:` on stdout, exit 0 (UNVERIFIED) | ✅ `open_url()` |
+| `dial` | `{number:str}` | adb · `am start -a android.intent.action.DIAL -d tel:<num>` | ~130 ms | stdout | as above | ✅ `dial()` |
+| `volume` | `{action:up\|down\|mute, steps?:1..10}` | adb · `input keyevent 24`×n / `25`×n / `164` | 156 ms + 60 ms/key | read-back (slow) | **164 toggles mute**, it does not set it | ✅ `volume:325` |
+| `brightness` | `{percent?:1..100, level?:0..255}` | adb · `settings put system screen_brightness_mode 0` + `settings put system screen_brightness N` | 143 ms + write | read-back `settings get system screen_brightness` | adaptive brightness resets `_mode` to 1 | ✅ `brightness:336` |
+| `wifi` | `{action:on\|off, allow_offline?:bool}` | adb · `svc wifi enable\|disable` (live) or `cmd wifi set-wifi-enabled enabled\|disabled` | 129 ms + write | `settings get global wifi_on` / `cmd wifi status` | **can kill the adb lane and the VPN** | ✅ `wifi:352` |
+| `battery` | `{}` | adb · `dumpsys battery` | 134 ms | n/a (it is the read) | — | ✅ `battery:363` |
+| `info` | `{what:time\|storage\|uptime\|ssid}` | **in-process** preferred; live code uses adb `date`/`df`/`uptime` | live ~100–160 ms, could be **<5 ms** | n/a | — | ✅ `info:383` |
+| `notifications` | `{}` (expand) | adb · `cmd statusbar expand-notifications` → fallback `input keyevent 83` | 131 ms | `dumpsys window` shade string (UNVERIFIED) | exit 0 when nothing happens | ✅ `notifications:416` |
+| `clipboard` | `{text?}` (set) / read | **termux-api** · `termux-clipboard-set` / `-get` | ~2.7 s | set: read back | `cmd clipboard` → *"No shell command implementation."* | ✅ `clipboard:310` |
+| `ui` | `{query?:str, tap?:bool}` | adb · `uiautomator dump` + parse | **2–4 s (slow lane)** | the dump itself | not a fast intent | ✅ `ui_dump:424` |
+| `foreground` | `{}` | adb · `dumpsys window \| grep -m1 mCurrentFocus` | 164 ms | — | `Broken pipe` noise on stderr | **new** |
+| `media` | `{action:play\|pause\|play-pause\|next\|previous\|stop}` | adb · `cmd media_session dispatch <action>` (pre-check `list-sessions`) | 129 + ~130 ms | list-sessions non-empty | **no session → exit 0, no output** | **new** |
+| `screen_lock` | `{verify?:bool}` | adb · read `dumpsys power` → `input keyevent 223` → re-read | 90+156+90 ms | `mWakefulness=Asleep` | sleep ≠ locked (auto-lock delay, Smart Lock) | **new** |
+| `flashlight` | `{on:bool}` | **termux-api** · `termux-torch on\|off` | ~2.7 s | none reliable | slow lane only | **new (slow)** |
 
-### B3.1 Notes that changed a decision
+### B3.1 Deltas the live implementation still needs
+
+Ordered by risk, not by effort. Each line is a concrete change in `jarvis_fast.py` /
+`jarvisd.py`; nothing else in this document is a code change.
+
+1. **The verdict must be a structured object, not a sentence.** Today every function returns
+   `{ok, intent, ms, detail:<persian string>}`; `_ok()` asserts success even when nothing was
+   checked. Add `verified:bool`, `lane:"adb"|"rish"|"termux-api"|"inprocess"` and `slow:bool`, and
+   make `detail` a dict (`{"stdout":…,"read_back":…}`). The app needs `verified` to pick between
+   «انجام شد» and «فرستاده شد — تأیید نشد».
+2. **`run_fast_turn` must not put the sentence in `result`** (B2.2 item 3) — a failed action
+   currently renders green.
+3. **Packages: pass `--user 0` and stop trusting exit codes.** `packages()` calls bare
+   `pm list packages` and splits every line containing `:`. On this phone that command **failed
+   once today** (`SecurityException: Shell does not have permission to access user 150`, Secure
+   Folder running, exit 0, empty list) and **succeeded 25 minutes later** (553 lines) — it is
+   state-dependent. `pm list packages --user 0` gave 553 / 112 (third-party) deterministically in
+   both tests, 162 ms. Also filter with `line.startswith("package:")` so a stack trace can never be
+   ingested as a package name.
+4. **`wifi off` needs the confirm token, not an in-band flag.** `allow_offline:true` is a good
+   internal guard (`wifi:356-357`) but the app must not be able to reach it by accident; use the
+   two-step `409 needs_confirm` + `confirm:"<token>"` of §B5. Also verify `svc wifi` actually works
+   on One UI 8 — `cmd wifi set-wifi-enabled` is the help-documented alternative.
+5. **Add the four missing intents** `foreground`, `media`, `screen_lock`, `flashlight` (rows above).
+   Without `foreground` no chip can honestly verify `home`/`open_app`.
+6. **`info` should stop paying for adb.** `time` → `time.time()` + `ZoneInfo("Asia/Tehran")`;
+   `storage` → `os.statvfs`; `uptime` → `/proc/uptime`. That turns three ~150 ms calls into <5 ms
+   and removes three failure modes.
+7. **Emit cards for direct `/fast` calls.** `POST /fast` (`jarvisd.py:537-546`) returns the verdict
+   but emits nothing, so a chip tap has no line in the transcript and no place in replay. Accept
+   `session` + `emit` and reuse `run_fast_turn`'s event sequence.
+8. **`/health` must publish the lanes** (`fast:{adb, adb_ms, rish, termux_api, serial}`) so the app
+   can grey out chips instead of failing them, and so a dead `adb connect` is diagnosable without
+   SSH.
+
+
+### B3.2 Notes that changed a decision
 
 - **`open_app` fuzzy matching.** Cache `pm list packages --user 0` (553 packages, 162 ms) plus the
   resolved components, in `~/.hermes/jarvis/cache/packages.json`, rebuilt at startup, on a miss, or
@@ -564,11 +624,17 @@ Columns: **args** (schema) · **lane/command** (exact) · **p50** (measured or d
   `aliases: {"تلگرام":"org.telegram.messenger", …}` block in the same cache (auto-grown when an
   agent opens an app successfully — cheap learning loop, no labels API needed). Ambiguous → `409`
   with `error.candidates` so the app can show a chooser.
-  **`--user 0` is mandatory**: `pm list packages -3` on this phone printed
-  `SecurityException: Shell does not have permission to access user 150` (Secure Folder is running,
-  `pm list users` → `0:Owner`, `150:Secure Folder`) and **exited 0 with empty stdout**. Same class
-  of trap: `cmd package resolve-activity` for a nonexistent package prints `No activity found` and
-  exits 0; `input keyevent 9999` exits 0. **Parse stdout; never trust exit codes for `cmd`/`pm`.**
+  **`--user 0` is mandatory, and exit codes lie.** Observed today, twice, 25 minutes apart, on the
+  same device: `pm list packages -3` → `SecurityException: Shell does not have permission to access
+  user 150`, **exit 0**, empty stdout (Secure Folder is running: `pm list users` → `0:Owner`,
+  `150:Secure Folder`); then the identical command → 112 lines. The failure is state-dependent, not
+  a fixed fact — which is worse, because it is intermittent. `pm list packages --user 0` returned
+  553 / 112 deterministically in both runs (162 ms). Same class of trap elsewhere:
+  `cmd package resolve-activity` for a nonexistent package prints `No activity found` and exits 0
+  (verified twice); `input keyevent 9999` exits 0 (verified); `cmd notification` help has no
+  read command; `cmd clipboard` answers *"No shell command implementation."*
+  **Parse stdout, filter it strictly (`line.startswith("package:")`), and never trust exit codes for
+  `cmd`/`pm`.**
 - **`screenshot`** uses `exec-out` (binary clean; `adb shell screencap -p` can mangle bytes).
   Guard with a 5 s timeout: a hung surface returns nothing and the daemon must report
   `error.code:"timeout"` rather than block. Read `dumpsys power | grep mWakefulness` first (90 ms)
@@ -640,26 +706,34 @@ from the intent catalogue so the app does not invent safety copy.
 
 ## B6. App chips → intents
 
-The bar above the input (`MainActivity.java:161-184`) gains a horizontally scrollable chip row of
-`Ui.pill` buttons (`MainActivity.java:141-143`) between the transcript and the input. Default set
-(one tap, no arguments):
+`jarvis_fast.py:463-471` already declares a `CHIPS` list (ساعت، باتری، اسکرین‌شات، خانه، برگشت،
+چه روی صفحه است) and `jarvisd.py:533` serves it inside `/catalog` — so the app should render
+**whatever the daemon publishes**, not a hard-coded row: the daemon then owns the vocabulary, and a
+new intent becomes a chip without an app release. Treat the table below as the recommended default
+set (superset of the live one), with `label` taken from the daemon.
 
-| chip | intent | note |
+The bar above the input (`MainActivity.java:161-184`) gains a horizontally scrollable chip row of
+`Ui.pill` buttons (`MainActivity.java:141-143`).
+
+| chip | `{intent, args}` | note |
 |---|---|---|
-| 📸 | `screenshot` | long-press → «با سؤال» (`vision:true`) |
-| ← | `back` | |
-| ⌂ | `home` | |
-| ▢ | `recents` | |
-| 🔉 | `volume{up}` | long-press → `down` |
-| 🔈 | `volume{mute}` | |
+| 📸 | `screenshot` | long-press → «با سؤال» (`vision:true`, slow) |
+| ← | `key{name:back}` | |
+| ⌂ | `key{name:home}` | verify with `foreground` |
+| ▢ | `key{name:recents}` | |
+| 🔉 | `volume{action:up}` | long-press → `down` |
+| 🔈 | `volume{action:mute}` | toggles — show the read-back state |
 | 🔒 | `screen_lock` | confirm dialog (caution) |
-| ⚡ | `open_app` | long-press → recent-3 chooser from `packages.json` |
+| ⚡ | `open_app` | long-press → recent-3 chooser from the package cache |
+| 🕒 | `info{what:time}` | in-process once delta 6 lands |
+| 🔋 | `battery` | |
 | 🎤 | (existing mic) | unchanged |
 | 🔗 | `open_url` | opens a one-field sheet |
 
 Rules: chips are disabled when `/health.fast.adb` is false (grey + tooltip «adb وصل نیست»); a tap
 paints an optimistic card immediately, then fills `result` from the 200 body — the same code path
-as `tool.start`/`tool.end` (`MainActivity.java:324-363`), so nothing new is needed in the adapter.
+as `tool.start`/`tool.end` (`MainActivity.java:324-363`), so nothing new is needed in the adapter
+once the verdict string is fixed (B2.2 item 3).
 `Ui.java` currently has no `TEAL`, although `MainActivity.java:334` references `Ui.TEAL` — whoever
 touches the app next should fix that first (the working tree as committed will not compile).
 
@@ -675,7 +749,7 @@ touches the app next should fix that first (the working tree as committed will n
    `cmd notification allow_listener`, `settings put secure …`, and above all **toggling adb or
    wireless debugging** — that is a self-lockout: it kills the PC's SSH lane and this fast lane in
    one move.
-4. **`wifi` off without confirmation** — see B3.1: it can take down the lane that ran it.
+4. **`wifi` off without confirmation** — see B3.2: it can take down the lane that ran it.
 5. **Blind input into an unverified foreground app.** Before `type`, `tap` on a sensitive screen,
    or `key`, when the action is not obviously idempotent, the caller must have a recent
    `foreground` (164 ms) or `ui_dump`. The device-control skill records this as the number-one
@@ -736,6 +810,14 @@ pessimistic for the adb lane and unrealistically *good* for nothing.
 | 24 | `termux-volume` / `termux-clipboard-get` / `termux-toast` | ok / empty / ok | 2747 / 2762 / 2937 |
 | 25 | `termux-notification-list` | **did not return in 120 s** (killed) | — |
 | 26 | `date +%s` / `echo hi` / `python3 -c pass` | — | 29 / 30 / 148 |
+| 27 | `pm list packages -3` re-run 25 min after #12 | **112 lines, success** (same command) | — |
+| 28 | `... shell "pm list packages"` (bare, stdout only / with stderr) | 553 / 555 lines | — |
+| 29 | `... shell "pm list users"` | `0:Owner running`, `150:Secure Folder running` | — |
+| 30 | `... shell "am get-current-user"` | `0` | — |
+
+#12 vs #27 is the point worth keeping: the same `pm` invocation failed and then succeeded without
+any change on our side, so an intent that treats "exit 0" as success will be right most of the time
+and silently wrong exactly when the device is in the state that matters.
 
 Source reads (all on `<APP>`): `agent/agent_init.py:549-601,633,648,677,694-695,960`;
 `agent/system_prompt.py:276-296,344-350,382-390,524-546,778-783`;
@@ -744,6 +826,8 @@ Source reads (all on `<APP>`): `agent/agent_init.py:549-601,633,648,677,694-695,
 `run_agent.py:421,509-514,8740-8752,8972`; `hermes_state.py:11801-11807`;
 `hermes_constants.py:17-18,30-46,114,193`; `hermes_cli/config.py:789,955-971`;
 `toolsets.py:103,176`; `agent/reasoning_effort.py:51`; `tools/skills_tool.py:53-54,818,1086`.
+Live fast-path reads: `~/.local/bin/jarvis_fast.py:76-135,191-231,270-333,352-424,441-471,508-543`;
+`~/.local/bin/jarvisd.py:65,533,537-556,784-821`.
 
 ## Appendix B — UNVERIFIED registry
 
@@ -764,6 +848,13 @@ Source reads (all on `<APP>`): `agent/agent_init.py:549-601,633,648,677,694-695,
    designed out of M2, so untested here.
 10. **Vision latency floor** (15–90 s comes from `<SKILLS>/mobile/android-vision-control`, not from
     a measurement today).
+11. **`svc wifi enable|disable`** (what `jarvis_fast.wifi` runs) actually toggling on One UI 8, and
+    whether the loopback adb connection survives it (`cmd wifi set-wifi-enabled` is the documented
+    alternative).
+12. **`monkey -p <pkg> -c …LAUNCHER 1` exit codes** — the implementation keys off the string
+    `No activities found`, which is the right instinct; the numeric status is unverified.
+13. **Why `pm list packages -3` failed then succeeded** (#12 vs #27). Hypothesis: the user-150
+    handle is only reachable while Secure Folder is resident, but the trigger was not isolated.
 
 ## Appendix C — acceptance tests (numbers, not vibes)
 
@@ -785,3 +876,22 @@ Source reads (all on `<APP>`): `agent/agent_init.py:549-601,633,648,677,694-695,
   entry appears under `errors`, chat still answers.
 - **C8** M1 regression per `CLAUDE.md`: a tool-needing message still streams a tool card and the
   answer in one turn, `/status` stays "connected".
+- **C9** Fast-path failure renders as a failure: send «فلان‌برنامه رو باز کن» in the app; the
+  `tool.end` card must be **red** (`result` contains `"ok": false`). Today this fails — see B2.2
+  item 3.
+- **C10** `POST /fast {intent:"wifi",args:{action:"off"}}` without a token → `409 needs_confirm`,
+  and with the token → `200` + `verified:true` only if `wifi_on=0` was read back.
+- **C11** 20 consecutive `open_app` calls for installed packages: `verified:true` ≥ 19/20, and the
+  package cache never contains a line without a `.` in it (junk-filter assertion for delta 3).
+
+## Appendix D — build order (what to do first)
+
+1. `run_fast_turn` verdict fix + `verified`/`lane`/`slow`/structured `detail` (B3.1 #1-2) — smallest
+   change, removes the "green lie".
+2. `packages()` `--user 0` + strict filter (B3.1 #3).
+3. `foreground` intent (B3.1 #5) — everything else that claims verification depends on it.
+4. Personas: loader + `GET /personas` + `Session.persona` (A3, A6) — no Hermes change needed.
+5. History per turn (`conversation_history` from `state.db`) — required by A5 and fixes the
+   pre-existing single-turn behaviour (0.2).
+6. `/fast` card emission for chip taps + `/health.fast` (B3.1 #7-8).
+7. Confirm tokens (B5), then the remaining intents (B3.1 #5) and `info` in-process (B3.1 #6).

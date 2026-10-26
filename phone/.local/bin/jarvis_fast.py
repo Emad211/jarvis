@@ -145,8 +145,15 @@ def grab(remote_path: str) -> Optional[bytes]:
 def packages(refresh: bool = False) -> List[str]:
     if not refresh and _pkg_cache["list"] and time.time() - _pkg_cache["at"] < 600:
         return _pkg_cache["list"]
-    code, out = sh("pm list packages", timeout=25)
-    names = sorted({line.split(":", 1)[1].strip() for line in out.splitlines() if ":" in line})
+    # `--user 0` matters: a bare `pm list packages` fails intermittently on this phone with
+    # "Shell does not have permission to access user 150" — and it exits 0 with no output,
+    # so the failure is silent. Pin the user and treat an empty answer as a failure.
+    names: List[str] = []
+    for cmd in ("pm list packages --user 0", "pm list packages"):
+        code, out = sh(cmd, timeout=25)
+        names = sorted({line.split(":", 1)[1].strip() for line in out.splitlines() if ":" in line})
+        if names:
+            break
     if names:
         _pkg_cache.update(at=time.time(), list=names)
     return names

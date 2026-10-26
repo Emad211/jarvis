@@ -19,28 +19,32 @@ import android.widget.TextView;
 /** Design tokens and the handful of widgets the console reuses. */
 final class Ui {
 
-    // Palette (docs/design-system.md): two neutrals, one accent, three status colours.
-    // Same token set as Hermes Control — the two apps must look like one system.
-    static final int BG = 0xFF07090E;
-    static final int SURFACE = 0xFF11151D;
-    static final int SURFACE_2 = 0xFF1A2029;
-    static final int STROKE = 0xFF222A36;
-    static final int TEXT = 0xFFEDF1F7;
-    static final int DIM = 0xFF9BA6B6;
-    static final int FAINT = 0xFF6A7484;
-    static final int ACCENT = 0xFF7FA6FF;
+    // Palette (docs/jarvis-visual-spec.md): two neutrals with a real step between them,
+    // one accent, three status colours. Elevation comes from the surface step + a hairline,
+    // never from a shadow or a gradient.
+    static final int BG = 0xFF0A0C11;
+    static final int SURFACE = 0xFF12151C;
+    static final int SURFACE_2 = 0xFF191D26;
+    static final int STROKE = 0xFF232833;
+    /** Hairline for edges that should read as "soft" rather than structural. */
+    static final int STROKE_HI = 0xFF2E353F;
+    static final int TEXT = 0xFFF2F5FA;
+    static final int DIM = 0xFFA3ADBD;
+    static final int FAINT = 0xFF6E7889;
+    static final int ACCENT = 0xFF7C93FF;
     static final int GREEN = 0xFF4ADE80;
     static final int AMBER = 0xFFFBBF24;
     static final int RED = 0xFFF87171;
-    /** User bubbles: a slightly lifted neutral, so the eye finds its own turns first. */
-    static final int USER = 0xFF1D2A44;
-    static final int ON_ACCENT = 0xFF06101F;
+    /** User bubbles: a slightly lifted blue-slate so own turns read as "mine". */
+    static final int USER = 0xFF1B2740;
+    static final int ON_ACCENT = 0xFF08101F;
 
     /** One radius scale; nothing in the console invents its own number. */
     static final float R_CHIP = 12f;
-    static final float R_INPUT = 14f;
+    static final float R_INPUT = 22f;
     static final float R_BUTTON = 16f;
     static final float R_BUBBLE = 20f;
+    static final float R_CARD = 18f;
 
     static Typeface REG = Typeface.SANS_SERIF;
     static Typeface BOLD = Typeface.DEFAULT_BOLD;
@@ -114,6 +118,11 @@ final class Ui {
         return new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, w);
     }
 
+    /** A zero-size view whose only job is to take the slack in a row. */
+    static View spacer(Context ctx) {
+        return new View(ctx);
+    }
+
     static LinearLayout.LayoutParams margins(LinearLayout.LayoutParams lp, Context ctx,
                                              float start, float top, float end, float bottom) {
         lp.setMarginStart(dp(ctx, start));
@@ -131,7 +140,9 @@ final class Ui {
         t.setTextColor(color);
         t.setTypeface(bold ? BOLD : REG);
         t.setIncludeFontPadding(false);
-        t.setLineSpacing(dp(ctx, 3), 1f);
+        // Vazirmatn's natural line box is 1.56em, so adding dp on top made every paragraph
+        // look loose. A sub-1 multiplier tightens the box itself and scales with font size.
+        t.setLineSpacing(0, sp >= 15f ? 0.95f : 1.0f);
         return t;
     }
 

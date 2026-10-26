@@ -15,7 +15,7 @@ class Icon extends View {
 
     static final int SEND = 0, MIC = 1, STOP = 2, SPEAKER = 3, PLUS = 4, MENU = 5, CHECK = 6,
             CLOSE = 7, BOLT = 8, CHAT = 9, GEAR = 10, WARN = 11, TRASH = 12, COPY = 13,
-            MIC_OFF = 14;
+            MIC_OFF = 14, CHEVRON = 15, GLOBE = 16, SPARK = 17;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
@@ -92,6 +92,25 @@ class Icon extends View {
                 line(c, 12, 18, 12, 21);
                 line(c, 8.5f, 21, 15.5f, 21);
                 break;
+            case SPARK:
+                line(c, 12, 3, 12, 9);
+                line(c, 12, 15, 12, 21);
+                line(c, 3, 12, 9, 12);
+                line(c, 15, 12, 21, 12);
+                line(c, 6, 6, 9.5f, 9.5f);
+                line(c, 14.5f, 14.5f, 18, 18);
+                line(c, 18, 6, 14.5f, 9.5f);
+                line(c, 9.5f, 14.5f, 6, 18);
+                break;
+            case CHEVRON:
+                line(c, 9, 6, 14.5f, 12, 9, 18);
+                break;
+            case GLOBE:
+                circle(c, 12, 12, 8.5f);
+                line(c, 3.5f, 12, 20.5f, 12);
+                arc(c, 12, 12, 4.5f, -70, 140);
+                arc(c, 12, 12, 4.5f, 110, 140);
+                break;
             case MIC_OFF:
                 line(c, 12, 3, 9, 6, 9, 11, 12, 14, 15, 11, 15, 6, 12, 3);
                 arc(c, 12, 12, 6, 0, 180);
@@ -156,3 +175,5 @@ class Icon extends View {
         }
     }
 }
+
+

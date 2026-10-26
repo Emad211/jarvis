@@ -380,6 +380,11 @@ def run_turn(session: Session, text: str) -> None:
     turn_id = session.turn_seq
     started = now()
     session.emit("turn.start", {"turn": turn_id, "text": text[:4000]})
+    # The agent starts every turn from the history we hand it: without this the console
+    # would forget the previous message ("my name is Emad" ... "what is my name?").
+    history = [{"role": m.get("role"), "content": m.get("text")}
+               for m in session.messages
+               if m.get("role") in ("user", "assistant") and m.get("text")]
     session.messages.append({"role": "user", "text": text, "ts": started})
     first_delta = {"t": None}
 
@@ -410,7 +415,8 @@ def run_turn(session: Session, text: str) -> None:
             lambda kind, name=None, preview=None, args=None:
             _progress(session, kind, name, preview, args,
                       {"t": first_delta["t"], "started": started}))
-        result = agent.run_conversation(user_message=text, task_id="jv-%s-%d" % (session.id, turn_id))
+        result = agent.run_conversation(user_message=text, conversation_history=history,
+                                        task_id="jv-%s-%d" % (session.id, turn_id))
         reply = (result or {}).get("final_response", "") or ""
         error = (result or {}).get("error")
         session.messages.append({"role": "assistant", "text": reply, "ts": now(),
@@ -739,6 +745,176 @@ def _hermes(*args: str) -> tuple:
         return 127, str(exc)
 
 
+# ------------------------------------------------------------------- custom providers --
+# "Any provider, in any shape": the app posts a url + a key + a wire format and this
+# registers it in two places — our own registry (what the UI lists) and Hermes' config
+# (what the agent actually uses). Writes go through `hermes config set`, never by editing
+# YAML ourselves, so backups/validation stay Hermes' job.
+CUSTOM_PATH = os.path.join(HERMES, "jarvis", "providers.json")
+KINDS = {
+    "openai":    {"api_mode": "chat_completions", "hint": "OpenAI-compatible /chat/completions"},
+    "anthropic": {"api_mode": "anthropic_messages", "hint": "Anthropic /v1/messages"},
+    "gemini":    {"api_mode": "chat_completions", "hint": "Gemini OpenAI-compatible /v1beta/openai"},
+}
+
+
+def custom_providers() -> List[Dict[str, Any]]:
+    try:
+        with open(CUSTOM_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return [p for p in data if isinstance(p, dict) and p.get("id")]
+    except (OSError, ValueError):
+        return []
+
+
+def save_custom(rows: List[Dict[str, Any]]) -> None:
+    os.makedirs(os.path.dirname(CUSTOM_PATH), exist_ok=True)
+    tmp = CUSTOM_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(rows, fh, ensure_ascii=False, indent=1)
+    os.replace(tmp, CUSTOM_PATH)
+
+
+def _slug(text: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return s[:32] or "provider"
+
+
+@app.get("/providers")
+def providers_list():
+    rows = []
+    for p in PROVIDERS:
+        rows.append({"id": p["id"], "label": p["label"], "builtin": True,
+                     "kind": "gemini" if p["id"] == "google_ai_studio" else "openai",
+                     "base_url": "", "models": [m["id"] for m in p["models"]],
+                     "key_env": p["key_env"], "has_key": bool(read_env(p["key_env"]))})
+    for p in custom_providers():
+        rows.append({"id": p["id"], "label": p.get("label", p["id"]), "builtin": False,
+                     "kind": p.get("kind", "openai"), "base_url": p.get("base_url", ""),
+                     "models": p.get("models") or [], "key_env": p.get("key_env", ""),
+                     "has_key": bool(read_env(p.get("key_env", ""))),
+                     "headers": p.get("headers") or {}})
+    return {"providers": rows, "kinds": [{"id": k, "hint": v["hint"]} for k, v in KINDS.items()]}
+
+
+@app.post("/providers")
+async def providers_add(req: Request):
+    body = await _json(req)
+    label = str(body.get("label") or "").strip()
+    base_url = str(body.get("base_url") or "").strip().rstrip("/")
+    kind = str(body.get("kind") or "openai").strip()
+    key = str(body.get("key") or "").strip()
+    models = body.get("models") or []
+    if isinstance(models, str):
+        models = [m.strip() for m in re.split(r"[,\n]", models) if m.strip()]
+    models = [str(m).strip() for m in models if str(m).strip()]
+    headers = body.get("headers") if isinstance(body.get("headers"), dict) else {}
+    if not label or not base_url:
+        return JSONResponse({"ok": False, "error": "label and base_url required"},
+                            status_code=400)
+    if kind not in KINDS:
+        return JSONResponse({"ok": False, "error": "unknown_kind"}, status_code=400)
+    if not re.match(r"^https?://", base_url):
+        return JSONResponse({"ok": False, "error": "base_url must be http(s)"}, status_code=400)
+    pid = _slug(body.get("id") or label)
+    key_env = str(body.get("key_env") or "").strip().upper()
+    if not key_env:
+        key_env = re.sub(r"[^A-Z0-9]+", "_", pid.upper()) + "_API_KEY"
+    if not KEY_ENV_OK.match(key_env):
+        return JSONResponse({"ok": False, "error": "key_env_not_allowed"}, status_code=403)
+
+    if key:
+        try:
+            _env_write(key_env, key)
+        except OSError as exc:
+            return JSONResponse({"ok": False, "error": "env_write_failed", "detail": str(exc)},
+                                status_code=500)
+
+    rows = [p for p in custom_providers() if p.get("id") != pid]
+    rows.append({"id": pid, "label": label, "kind": kind, "base_url": base_url,
+                 "key_env": key_env, "models": models,
+                 "headers": {str(k): str(v) for k, v in headers.items()}})
+    save_custom(rows)
+
+    # Hermes: keep its own config authoritative for the agent, one scalar at a time.
+    api_mode = KINDS[kind]["api_mode"]
+    _hermes("config", "set", "providers.%s.name" % pid, label)
+    _hermes("config", "set", "providers.%s.key_env" % pid, key_env)
+    if api_mode == "anthropic_messages":
+        _hermes("config", "set", "providers.%s.api_mode" % pid, api_mode)
+        _hermes("config", "set", "providers.%s.base_url" % pid, base_url)
+    else:
+        _hermes("config", "set", "providers.%s.transport" % pid, "chat_completions")
+        _hermes("config", "set", "providers.%s.api" % pid, base_url)
+    if models:
+        _hermes("config", "set", "providers.%s.models" % pid, json.dumps(models))
+        _hermes("config", "set", "providers.%s.default_model" % pid, models[0])
+    if headers:
+        _hermes("config", "set", "providers.%s.extra_headers" % pid,
+                json.dumps({str(k): str(v) for k, v in headers.items()}))
+    for s in HUB.sessions.values():
+        s.agent = None
+    return {"ok": True, "id": pid, "key_env": key_env, "models": models,
+            "has_key": bool(read_env(key_env)), "agents_cleared": True}
+
+
+@app.delete("/providers/{pid}")
+async def providers_delete(pid: str):
+    rows = [p for p in custom_providers() if p.get("id") != pid]
+    save_custom(rows)
+    _hermes("config", "unset", "providers.%s" % pid)
+    for s in HUB.sessions.values():
+        s.agent = None
+    return {"ok": True, "id": pid}
+
+
+@app.post("/providers/test")
+async def providers_test(req: Request):
+    """One tiny chat against a custom provider, using whatever wire format it declares."""
+    body = await _json(req)
+    pid = str(body.get("id") or "")
+    row = next((p for p in custom_providers() if p.get("id") == pid), None)
+    if not row:
+        return {"ok": False, "error": "unknown_provider"}
+    key = read_env(row.get("key_env", ""))
+    if not key:
+        return {"ok": False, "error": "no_key"}
+    model = str(body.get("model") or (row.get("models") or [""])[0])
+    if not model:
+        return {"ok": False, "error": "no_model"}
+    kind = row.get("kind", "openai")
+    headers = dict(row.get("headers") or {})
+    started = now()
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=45) as client:
+            if kind == "anthropic":
+                url = row["base_url"]
+                if not url.endswith("/messages"):
+                    url = url + "/messages"
+                h = dict(headers, **{"x-api-key": key, "anthropic-version": "2023-06-01",
+                                     "Content-Type": "application/json"})
+                payload = {"model": model, "max_tokens": 16,
+                           "messages": [{"role": "user", "content": "reply with: ok"}]}
+            else:
+                url = row["base_url"]
+                if not url.endswith("/chat/completions"):
+                    url = url + "/chat/completions"
+                h = dict(headers, **{"Authorization": "Bearer " + key,
+                                     "Content-Type": "application/json"})
+                payload = {"model": model, "max_tokens": 16,
+                           "messages": [{"role": "user", "content": "reply with: ok"}]}
+            r = await client.post(url, headers=h, json=payload)
+        ms = int((now() - started) * 1000)
+        if r.status_code != 200:
+            return {"ok": False, "status": r.status_code, "ms": ms,
+                    "error": "http_%d" % r.status_code, "detail": r.text[:300]}
+        return {"ok": True, "status": 200, "ms": ms, "reply": r.text[:200], "model": model}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "status": 0, "error": "network",
+                "detail": "%s: %s" % (type(exc).__name__, exc)}
+
+
 @app.post("/session/new")
 async def session_new(req: Request):
     body = await _json(req)
@@ -810,10 +986,11 @@ def run_fast_turn(session: Session, text: str, routed: Dict[str, Any]) -> None:
                                 "args": _short(routed.get("args"), 200)})
     try:
         res = fast.run(str(routed.get("intent")), routed.get("args") or {})
+        ok = bool(res.get("ok"))
+        detail = res.get("detail") or ("انجام شد" if ok else "نشد")
         session.emit("tool.end", {"id": call_id, "name": "fast:" + str(routed.get("intent")),
-                                  "result": _short(res.get("detail"), 400)})
-        detail = res.get("detail") or ("انجام شد" if res.get("ok") else "نشد")
-        reply = label + ": " + detail if res.get("ok") else label + " نشد — " + detail
+                                  "ok": ok, "result": _short(detail, 400)})
+        reply = (label + ": " + detail) if ok else (label + " نشد — " + detail)
         session.emit("text.delta", {"text": reply})
         session.messages.append({"role": "assistant", "text": reply, "ts": now(),
                                  "ms": int(res.get("ms") or 0), "fast": True})

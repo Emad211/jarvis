@@ -62,6 +62,10 @@ final class Api {
         call("POST", path, payload == null ? new JSONObject() : payload, timeoutMs, ok, fail);
     }
 
+    static void delete(String path, int timeoutMs, Ok ok, Fail fail) {
+        call("DELETE", path, null, timeoutMs, ok, fail);
+    }
+
     private static void call(String method, String path, JSONObject payload, int timeoutMs,
                              Ok ok, Fail fail) {
         POOL.execute(() -> {

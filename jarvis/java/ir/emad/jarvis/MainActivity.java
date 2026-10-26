@@ -43,6 +43,7 @@ public class MainActivity extends Activity {
     private ListView list;
     private ChatAdapter adapter;
     private LinearLayout chips;
+    private View empty;
     private EditText input;
     private TextView stateLine;
     private TextView modelChip;
@@ -63,6 +64,7 @@ public class MainActivity extends Activity {
     private long lastNotify;
     private String lastTurnText = "";
     private boolean reconnecting;
+    private boolean busy;
 
     // ------------------------------------------------------------------ lifecycle --
     @Override
@@ -125,31 +127,35 @@ public class MainActivity extends Activity {
         root.setFitsSystemWindows(true);
         setContentView(root);
 
-        // header: dot + name + state, model chip, menu
+        // header: menu, title + live state, new chat
         LinearLayout header = Ui.row(this);
-        header.setPadding(Ui.dp(this, 14), Ui.dp(this, 14), Ui.dp(this, 12), Ui.dp(this, 8));
+        header.setPadding(Ui.dp(this, 12), Ui.dp(this, 12), Ui.dp(this, 12), Ui.dp(this, 6));
+        header.addView(Ui.iconButton(this, Icon.MENU, Ui.DIM, v -> menu()));
         LinearLayout titles = Ui.col(this);
         LinearLayout titleRow = Ui.row(this);
-        dot = Ui.dot(this, Ui.FAINT, 9);
-        titleRow.addView(dot);
-        titleRow.addView(Ui.text(this, "JARVIS", 17f, Ui.TEXT, true),
-                Ui.margins(Ui.wrap(), this, 8, 0, 0, 0));
+        titleRow.addView(Ui.text(this, "جارویس", 19f, Ui.TEXT, true));
         titles.addView(titleRow);
+        LinearLayout stateRow = Ui.row(this);
+        stateRow.setPadding(0, Ui.dp(this, 3), 0, 0);
+        dot = Ui.dot(this, Ui.FAINT, 7);
+        stateRow.addView(dot);
         stateLine = Ui.oneLine(Ui.text(this, "در حال اتصال…", 11.5f, Ui.DIM, false));
-        stateLine.setPadding(0, Ui.dp(this, 4), 0, 0);
-        titles.addView(stateLine);
-        header.addView(titles, Ui.weight(1f));
+        stateRow.addView(stateLine, Ui.margins(Ui.weight(1f), this, 6, 0, 0, 0));
+        titles.addView(stateRow);
+        header.addView(titles, Ui.margins(Ui.weight(1f), this, 12, 0, 12, 0));
         modelChip = Ui.pill(this, "مدل", Ui.ACCENT);
         modelChip.setOnClickListener(v -> pickModel());
-        header.addView(modelChip, Ui.margins(Ui.wrap(), this, 6, 0, 6, 0));
-        header.addView(Ui.iconButton(this, Icon.MENU, Ui.DIM, v -> menu()));
+        header.addView(modelChip, Ui.margins(Ui.wrap(), this, 0, 0, 8, 0));
+        header.addView(Ui.iconButton(this, Icon.PLUS, Ui.DIM, v -> openSession("")));
         root.addView(header, Ui.fill());
 
+        // transcript + empty state stacked in one frame
+        FrameLayout stack = new FrameLayout(this);
         list = new ListView(this);
         list.setDivider(null);
         list.setDividerHeight(0);
         list.setSelector(android.R.color.transparent);
-        list.setPadding(Ui.dp(this, 6), Ui.dp(this, 4), Ui.dp(this, 6), Ui.dp(this, 8));
+        list.setPadding(Ui.dp(this, 4), Ui.dp(this, 6), Ui.dp(this, 4), Ui.dp(this, 10));
         list.setClipToPadding(false);
         list.setTranscriptMode(ListView.TRANSCRIPT_MODE_NORMAL);
         adapter = new ChatAdapter(this, messages, v -> {
@@ -157,25 +163,33 @@ public class MainActivity extends Activity {
             return true;
         });
         list.setAdapter(adapter);
-        root.addView(list, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        stack.addView(list, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        empty = emptyState();
+        stack.addView(empty, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        root.addView(stack, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         // quick actions: deterministic device intents, no model, no waiting
         chips = Ui.row(this);
         chips.setPadding(Ui.dp(this, 4), 0, Ui.dp(this, 4), 0);
         android.widget.HorizontalScrollView strip = new android.widget.HorizontalScrollView(this);
         strip.setHorizontalScrollBarEnabled(false);
-        strip.setPadding(Ui.dp(this, 10), Ui.dp(this, 2), Ui.dp(this, 10), 0);
+        strip.setPadding(Ui.dp(this, 12), Ui.dp(this, 2), Ui.dp(this, 12), Ui.dp(this, 4));
         strip.addView(chips);
         root.addView(strip, Ui.fill());
 
-        // input bar: mic, field, send
+        // input: send (start edge = thumb side in RTL), field, mic
         LinearLayout bar = Ui.row(this);
-        bar.setPadding(Ui.dp(this, 10), Ui.dp(this, 6), Ui.dp(this, 10), Ui.dp(this, 12));
-        micIcon = Ui.iconButton(this, Icon.MIC, Ui.ACCENT, v -> toggleMic());
-        bar.addView(micIcon);
-        input = Ui.input(this, "به جارویس بگو چه کار کن…");
+        bar.setPadding(Ui.dp(this, 12), Ui.dp(this, 2), Ui.dp(this, 12), Ui.dp(this, 14));
+        sendIcon = Ui.iconButton(this, Icon.SEND, Ui.ON_ACCENT, v -> onSendTapped());
+        sendIcon.setBackground(Ui.ripple(this, Ui.round(this, Ui.ACCENT, 23), Ui.ON_ACCENT));
+        sendIcon.setLayoutParams(new LinearLayout.LayoutParams(Ui.dp(this, 46), Ui.dp(this, 46)));
+        bar.addView(sendIcon);
+        micIcon = Ui.iconButton(this, Icon.MIC, Ui.DIM, v -> toggleMic());
+        bar.addView(micIcon, Ui.margins(Ui.wrap(), this, 8, 0, 0, 0));
+        input = Ui.input(this, "پیام به جارویس…");
         input.setMaxLines(4);
-        // Enter on the soft keyboard sends, like every chat app.
         input.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEND);
         input.setRawInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         input.setOnEditorActionListener((v, actionId, event) -> {
@@ -188,13 +202,54 @@ public class MainActivity extends Activity {
             }
             return false;
         });
-        bar.addView(input, Ui.margins(Ui.weight(1f), this, 8, 0, 8, 0));
-        sendIcon = Ui.iconButton(this, Icon.SEND, Ui.GREEN, v -> send(false));
-        bar.addView(sendIcon);
+        bar.addView(input, Ui.margins(Ui.weight(1f), this, 8, 0, 0, 0));
         root.addView(bar, Ui.fill());
+    }
 
-        // Enter on a hardware keyboard sends; the button is the normal path on a phone.
-        input.setOnKeyListener((v, code, e) -> false);
+    /** What a new user sees first: a greeting, three ways to start, nothing else. */
+    private View emptyState() {
+        LinearLayout box = Ui.col(this);
+        box.setGravity(android.view.Gravity.CENTER);
+        box.setPadding(Ui.dp(this, 28), 0, Ui.dp(this, 28), Ui.dp(this, 40));
+
+        box.addView(new Icon(this, Icon.SPARK, Ui.ACCENT),
+                new LinearLayout.LayoutParams(Ui.dp(this, 30), Ui.dp(this, 30)));
+
+        TextView hi = Ui.text(this, "سلام عماد", 26f, Ui.TEXT, true);
+        hi.setGravity(android.view.Gravity.CENTER);
+        box.addView(hi, Ui.margins(Ui.fill(), this, 0, 16, 0, 0));
+        TextView sub = Ui.text(this, "چه کاری برات انجام بدم؟", 14f, Ui.DIM, false);
+        sub.setGravity(android.view.Gravity.CENTER);
+        box.addView(sub, Ui.margins(Ui.fill(), this, 0, 8, 0, 0));
+
+        String[][] ideas = {
+                {"تلگرام رو باز کن", "باز کردن تلگرام"},
+                {"اسکرین‌شات بگیر", "تصویر صفحه"},
+                {"ساعت چنده؟", "ساعت و تاریخ"},
+                {"یک اسکریپت پایتون برای مرتب کردن دانلودها بنویس", "کدنویسی"},
+        };
+        for (String[] idea : ideas) {
+            LinearLayout card = Ui.row(this);
+            card.setPadding(Ui.dp(this, 14), Ui.dp(this, 13), Ui.dp(this, 14), Ui.dp(this, 13));
+            card.setBackground(Ui.ripple(this, Ui.outline(this, Ui.SURFACE, Ui.STROKE, Ui.R_CARD),
+                    Ui.ACCENT));
+            card.addView(Ui.text(this, idea[0], 13.5f, Ui.TEXT, false), Ui.weight(1f));
+            card.addView(Ui.text(this, idea[1], 10.5f, Ui.FAINT, false));
+            card.setOnClickListener(v -> {
+                input.setText(idea[0]);
+                input.setSelection(input.getText().length());
+                send(false);
+            });
+            box.addView(card, Ui.margins(Ui.fill(), this, 0, 12, 0, 0));
+        }
+        return box;
+    }
+
+    private void updateEmptyState() {
+        if (empty != null) {
+            empty.setVisibility(messages.isEmpty() ? View.VISIBLE : View.GONE);
+            list.setVisibility(messages.isEmpty() ? View.GONE : View.VISIBLE);
+        }
     }
 
     // ------------------------------------------------------------------ daemon io --
@@ -373,6 +428,8 @@ public class MainActivity extends Activity {
                 streaming.model = model;
                 messages.add(streaming);
                 notifyList();
+                busy = true;
+                sendIcon.set(Icon.STOP, Ui.ON_ACCENT);
                 setState("فکر می‌کند…", Ui.ACCENT);
                 break;
             }
@@ -467,7 +524,9 @@ public class MainActivity extends Activity {
                 }
                 notifyList();
                 streaming = null;
-                setState("آماده" + (ms > 0 ? " · " + (ms / 1000f) + "s" : ""), Ui.GREEN);
+                busy = false;
+                sendIcon.set(Icon.SEND, Ui.ON_ACCENT);
+                setState("آماده", Ui.GREEN);
                 break;
             }
             default:
@@ -534,6 +593,16 @@ public class MainActivity extends Activity {
     }
 
     // ------------------------------------------------------------------- actions --
+    /** The send button doubles as a stop button while a turn is running. */
+    private void onSendTapped() {
+        if (busy) {
+            Api.post("/session/" + sessionId + "/cancel", Api.body(), 15000,
+                    res -> setState("متوقف شد", Ui.DIM), msg -> { });
+            return;
+        }
+        send(false);
+    }
+
     private void send(boolean fromVoice) {
         String text = input.getText().toString().trim();
         if (text.isEmpty() || sessionId.isEmpty()) {
@@ -591,17 +660,15 @@ public class MainActivity extends Activity {
     }
 
     private void menu() {
-        String[] items = {
+        java.util.List<String> items = java.util.Arrays.asList(
                 "گفتگوی تازه",
                 "گفتگوهای قبلی",
+                "پرووایدرها و کلیدها",
                 "تنظیمات",
                 "راه‌اندازی اولیه",
-                "صدا روی پاسخ‌ها: " + (ttsOn ? "روشن" : "خاموش"),
-                "کپی آخرین پاسخ",
-        };
-        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-                .setTitle("منو")
-                .setItems(items, (d, which) -> {
+                ttsOn ? "صدا روی پاسخ‌ها: روشن" : "صدا روی پاسخ‌ها: خاموش",
+                "کپی آخرین پاسخ");
+        Sheet.rows(this, "منو", items, which -> {
                     switch (which) {
                         case 0:
                             openSession("");
@@ -610,12 +677,15 @@ public class MainActivity extends Activity {
                             sessionsDialog();
                             break;
                         case 2:
-                            settings();
+                            providersDialog();
                             break;
                         case 3:
-                            setupWizard();
+                            settings();
                             break;
                         case 4:
+                            setupWizard();
+                            break;
+                        case 5:
                             ttsOn = !ttsOn;
                             prefs.edit().putBoolean("tts", ttsOn).apply();
                             toast(ttsOn ? "صدا روشن شد" : "صدا خاموش شد");
@@ -624,7 +694,7 @@ public class MainActivity extends Activity {
                             copyLast();
                             break;
                     }
-                }).show();
+                });
     }
 
     // -------------------------------------------------------------------- first run --
@@ -638,6 +708,137 @@ public class MainActivity extends Activity {
         }, msg -> {
             // an older daemon has no setup endpoints; the console still works if keys exist
         });
+    }
+
+    // ------------------------------------------------------------------- providers --
+    /** Any provider, any shape: list, test, add, remove. The daemon owns the writes. */
+    private void providersDialog() {
+        Api.get("/providers", 15000, res -> {
+            JSONArray rows = res.optJSONArray("providers");
+            if (rows == null) {
+                toast("لیست پرووایدرها نیامد");
+                return;
+            }
+            final List<String> ids = new ArrayList<>();
+            final List<String> labels = new ArrayList<>();
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject p = rows.optJSONObject(i);
+                if (p == null) {
+                    continue;
+                }
+                ids.add(p.optString("id", ""));
+                String state = p.optBoolean("has_key") ? "کلید دارد" : "بدون کلید";
+                labels.add(p.optString("label", "") + "  ·  " + state
+                        + (p.optBoolean("builtin") ? "  ·  داخلی" : ""));
+            }
+            labels.add(0, "افزودن پرووایدر دلخواه");
+            ids.add(0, "");
+            Sheet.rows(this, "پرووایدرها", labels, which -> {
+                if (which == 0) {
+                    addProviderDialog();
+                } else {
+                    providerActions(ids.get(which), labels.get(which));
+                }
+            });
+        }, msg -> toast("لیست نیامد: " + msg));
+    }
+
+    private void providerActions(String id, String label) {
+        java.util.List<String> actions = java.util.Arrays.asList(
+                "تست کلید", "حذف", "اولین مدلش را پیش‌فرض کن");
+        Sheet.rows(this, label, actions, which -> {
+                    if (which == 0) {
+                        AlertDialog spin = progress("تست…");
+                        Api.post("/providers/test", Api.body("id", id), 60000, res -> {
+                            spin.dismiss();
+                            toast(res.optBoolean("ok", false)
+                                    ? "کار می‌کند (" + res.optInt("ms", 0) + " ms)"
+                                    : "نشد: " + res.optString("error", "?"));
+                        }, msg -> {
+                            spin.dismiss();
+                            toast("نشد: " + msg);
+                        });
+                    } else if (which == 1) {
+                        Api.delete("/providers/" + id, 20000, res -> {
+                            toast("حذف شد");
+                            loadCatalog();
+                        }, msg -> toast("حذف نشد: " + msg));
+                    } else {
+                        Api.get("/providers", 15000, res2 -> {
+                            JSONArray rows = res2.optJSONArray("providers");
+                            for (int i = 0; rows != null && i < rows.length(); i++) {
+                                JSONObject p = rows.optJSONObject(i);
+                                if (p != null && id.equals(p.optString("id"))) {
+                                    JSONArray models = p.optJSONArray("models");
+                                    String m = models != null && models.length() > 0
+                                            ? models.optString(0) : "";
+                                    if (m.isEmpty()) {
+                                        toast("این پرووایدر مدلی ندارد");
+                                    } else {
+                                        applyModel(id, m);
+                                    }
+                                    return;
+                                }
+                            }
+                        }, msg -> toast(msg));
+                    }
+                });
+    }
+
+    private void addProviderDialog() {
+        LinearLayout box = Ui.col(this);
+        box.setPadding(Ui.dp(this, 20), Ui.dp(this, 8), Ui.dp(this, 20), Ui.dp(this, 8));
+        final EditText label = Ui.input(this, "نام (مثلاً Local Llama)");
+        final EditText base = Ui.input(this, "https://host/v1");
+        base.setTextDirection(View.TEXT_DIRECTION_LTR);
+        final EditText key = Ui.input(this, "کلید API (اختیاری)");
+        key.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        key.setTextDirection(View.TEXT_DIRECTION_LTR);
+        final EditText models = Ui.input(this, "m1, m2");
+        models.setTextDirection(View.TEXT_DIRECTION_LTR);
+        labelText(box, "نام");
+        box.addView(label, Ui.margins(Ui.fill(), this, 0, 4, 0, 10));
+        labelText(box, "آدرس پایه — هر شکلی: OpenAI، Anthropic، Gemini، محلی");
+        box.addView(base, Ui.margins(Ui.fill(), this, 0, 4, 0, 10));
+        labelText(box, "کلید (اگر لازم ندارد خالی بگذار)");
+        box.addView(key, Ui.margins(Ui.fill(), this, 0, 4, 0, 10));
+        labelText(box, "مدل‌ها، با کاما");
+        box.addView(models, Ui.margins(Ui.fill(), this, 0, 4, 0, 0));
+        box.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+        android.widget.ScrollView scroller = new android.widget.ScrollView(this);
+        scroller.addView(box);
+        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                .setTitle("پرووایدر دلخواه")
+                .setView(scroller)
+                .setPositiveButton("ذخیره", (d, w) -> {
+                    String url = base.getText().toString().trim();
+                    String kind = url.contains("anthropic") ? "anthropic"
+                            : url.contains("generativelanguage") ? "gemini" : "openai";
+                    AlertDialog spin = progress("ثبت پرووایدر…");
+                    Api.post("/providers", Api.body(
+                            "label", label.getText().toString().trim(),
+                            "base_url", url,
+                            "kind", kind,
+                            "key", key.getText().toString().trim(),
+                            "models", models.getText().toString().trim()), 60000, res -> {
+                        spin.dismiss();
+                        if (!res.optBoolean("ok", false)) {
+                            toast("ثبت نشد: " + res.optString("error", "?"));
+                            return;
+                        }
+                        toast("ثبت شد: " + res.optString("id", ""));
+                        loadCatalog();
+                    }, msg -> {
+                        spin.dismiss();
+                        toast("ثبت نشد: " + msg);
+                    });
+                })
+                .setNegativeButton("لغو", null)
+                .show();
+    }
+
+    private void labelText(LinearLayout box, String text) {
+        box.addView(Ui.text(this, text, 11.5f, Ui.DIM, false));
     }
 
     /** Provider → key → live test → default model. Everything is written by the daemon. */
@@ -836,16 +1037,14 @@ public class MainActivity extends Activity {
                 labels.add(title + "  ·  " + s.optInt("turns", 0) + " نوبت"
                         + (s.optBoolean("busy") ? "  ·  در حال اجرا" : ""));
             }
-            labels.add(0, "➕ گفتگوی تازه");
+            labels.add(0, "گفتگوی تازه");
             ids.add(0, "");
-            new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-                    .setTitle("گفتگوها")
-                    .setItems(labels.toArray(new String[0]), (d, which) -> {
-                        String id = ids.get(which);
-                        prefs.edit().putString("session", id).apply();
-                        lastSeq = 0;
-                        openSession(id);
-                    }).show();
+            Sheet.rows(this, "گفتگوها", labels, which -> {
+                String id = ids.get(which);
+                prefs.edit().putString("session", id).apply();
+                lastSeq = 0;
+                openSession(id);
+            });
         }, msg -> toast("لیست نیامد: " + msg));
     }
 
@@ -868,17 +1067,15 @@ public class MainActivity extends Activity {
                 ids.add(m.optString("model", ""));
                 labels.add(m.optString("label", "") + "  ·  " + m.optString("provider", ""));
             }
-            new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-                    .setTitle("مدل")
-                    .setItems(labels.toArray(new String[0]), (d, which) -> {
-                        model = ids.get(which);
-                        prefs.edit().putString("model", model).apply();
-                        modelChip.setText(ChatAdapter.shortModel(model));
-                        if (!sessionId.isEmpty()) {
-                            Api.post("/session/" + sessionId + "/model", Api.body("model", model),
-                                    15000, res -> toast("مدل عوض شد"), msg -> toast(msg));
-                        }
-                    }).show();
+            Sheet.rows(this, "مدل", labels, which -> {
+                model = ids.get(which);
+                prefs.edit().putString("model", model).apply();
+                modelChip.setText(ChatAdapter.shortModel(model));
+                if (!sessionId.isEmpty()) {
+                    Api.post("/session/" + sessionId + "/model", Api.body("model", model),
+                            15000, res -> toast("مدل عوض شد"), msg -> toast(msg));
+                }
+            });
         } catch (Exception e) {
             toast("کاتالوگ خوانده نشد");
         }
@@ -963,6 +1160,7 @@ public class MainActivity extends Activity {
     }
 
     private void notifyList() {
+        updateEmptyState();
         long now = System.currentTimeMillis();
         if (now - lastNotify < NOTIFY_MS) {
             ui.postDelayed(() -> {
@@ -984,3 +1182,11 @@ public class MainActivity extends Activity {
         list.setSelection(messages.size() - 1);
     }
 }
+
+
+
+
+
+
+
+
