@@ -80,15 +80,36 @@ JARVIS_BRIEF = (
     "tool failed, say what failed. Never print API keys or passwords."
 )
 
-# Toolsets offered by the app; preset "fast" keeps the prompt small (quicker first token).
-# `skills` and `cronjob` are in the fast preset on purpose: self-improvement (the agent writes
-# a skill after it learns something) and scheduling are part of the product, not add-ons.
-FAST_TOOLSETS = ["terminal", "file", "todo", "memory", "skills", "vision", "clarify"]
+# Toolset presets. The old default was a 7-tool subset that silently excluded web search,
+# code execution, delegation (a real team) and cron — so "Jarvis" could not research, could not
+# write and run code, could not hand work to sub-agents and could not schedule anything. The
+# default is now `smart`: everything that makes it an assistant, minus the expensive toys.
 TOOLSETS = [
     "web", "browser", "terminal", "file", "code_execution", "vision", "image_gen", "tts",
     "skills", "todo", "memory", "session_search", "clarify", "delegation", "cronjob",
     "computer_use",
 ]
+TOOLSET_PRESETS = {
+    # The smallest prompt: fastest first token, no research, no code.
+    "fast": ["terminal", "file", "todo", "memory", "clarify"],
+    # Research + write + run code + delegate + schedule. This is the default.
+    "smart": ["web", "terminal", "file", "code_execution", "vision", "skills", "todo",
+              "memory", "session_search", "clarify", "delegation", "cronjob"],
+    # Everything the phone can do, including driving the screen and generating media.
+    "full": TOOLSETS,
+}
+DEFAULT_TOOLSETS = "smart"
+FAST_TOOLSETS = TOOLSET_PRESETS["fast"]  # kept for the warm-up path and old callers
+
+
+def preset_toolsets(name: str) -> List[str]:
+    if name in TOOLSET_PRESETS:
+        return list(TOOLSET_PRESETS[name])
+    if isinstance(name, str) and name.count(",") >= 0 and name.strip():
+        wanted = [t.strip() for t in name.split(",") if t.strip()]
+        if wanted:
+            return wanted
+    return list(TOOLSET_PRESETS[DEFAULT_TOOLSETS])
 
 # Measured on this phone (2026-10-26): lite + reasoning off + a warm agent answers with
 # its first token in ~1.8 s, the same turn on gemini-3.5-flash costs ~0.6 s more, and
@@ -146,6 +167,8 @@ class Session:
         self.model = ""
         self.reasoning = DEFAULT_REASONING
         self.persona = ""
+        # Which toolset preset this session runs on ("fast" | "smart" | "full" | a csv list).
+        self.toolsets = ""
         self.messages: List[Dict[str, Any]] = []
         self.asks: Dict[str, Dict[str, Any]] = {}
         self.turn_seq = 0
@@ -179,7 +202,8 @@ class Session:
             data = {"id": self.id, "title": self.title, "created": self.created,
                     "updated": self.updated, "model": self.model,
                     "reasoning": self.reasoning, "turns": self.turn_seq,
-                    "persona": self.persona, "messages": self.messages}
+                    "persona": self.persona, "toolsets": self.toolsets,
+                    "messages": self.messages}
             tmp = self.path() + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, ensure_ascii=False)
@@ -200,6 +224,7 @@ class Session:
         s.model = str(data.get("model") or "")
         s.reasoning = str(data.get("reasoning") or DEFAULT_REASONING)
         s.persona = str(data.get("persona") or "")
+        s.toolsets = str(data.get("toolsets") or "")
         s.turn_seq = int(data.get("turns") or 0)
         s.messages = data.get("messages") or []
         return s
@@ -422,12 +447,13 @@ def run_turn(session: Session, text: str) -> None:
         cfg = load_config()
         model = session.model or ((cfg.get("model") or {}).get("default") or "gemini-3.5-flash")
         reasoning = session.reasoning
-        toolsets = FAST_TOOLSETS
-        if session.agent is None or getattr(session.agent, "_jarvis_key", None) != (model, reasoning):
+        toolsets = preset_toolsets(session.toolsets or DEFAULT_TOOLSETS)
+        key = (model, reasoning, ",".join(toolsets))
+        if session.agent is None or getattr(session.agent, "_jarvis_key", None) != key:
             agent, approval = build_agent(session, model, toolsets, reasoning)
             # Swap only after a successful build, and route this thread's approvals.
             session.agent = agent
-            setattr(agent, "_jarvis_key", (model, reasoning))
+            setattr(agent, "_jarvis_key", key)
         else:
             approval = _approval_for(session, model, reasoning)
         set_approval_callback(approval)
@@ -548,7 +574,9 @@ def catalog():
     aliases = list(((cfg.get("model") or {}).get("aliases") or {}).keys())
     current = ((cfg.get("model") or {}).get("default") or "")
     return {"models": models, "aliases": aliases, "current": current,
-            "toolsets": TOOLSETS, "presets": {"fast": FAST_TOOLSETS},
+            "toolsets": TOOLSETS,
+            "presets": {k: v for k, v in TOOLSET_PRESETS.items()},
+            "default_preset": DEFAULT_TOOLSETS,
             "reasoning": ["none", "minimal", "low", "medium", "high"],
             "chips": fast.CHIPS,
             "personas": [{"id": "jarvis", "label": "جارویس"}]}
@@ -1172,7 +1200,7 @@ def session_get(sid: str):
         return JSONResponse({"error": "no such session"}, status_code=404)
     return {"session": s.id, "title": s.title, "model": s.model or _default_model(),
             "reasoning": s.reasoning, "busy": s.busy, "messages": s.messages,
-            "persona": s.persona, "seq": s.seq}
+            "persona": s.persona, "toolsets": s.toolsets, "seq": s.seq}
 
 
 @app.post("/session/{sid}/turn")
@@ -1284,6 +1312,21 @@ async def session_reasoning(sid: str, req: Request):
     return {"ok": True, "reasoning": s.reasoning}
 
 
+@app.post("/session/{sid}/toolsets")
+async def session_toolsets(sid: str, req: Request):
+    """Pick the tool preset for this conversation: fast | smart | full | a csv of toolsets."""
+    s = HUB.get(sid)
+    if not s:
+        return JSONResponse({"error": "no such session"}, status_code=404)
+    body = await _json(req)
+    wanted = str(body.get("preset") or body.get("toolsets") or "").strip()
+    resolved = preset_toolsets(wanted)
+    s.toolsets = wanted
+    s.agent = None
+    s.save()
+    return {"ok": True, "preset": wanted or DEFAULT_TOOLSETS, "toolsets": resolved}
+
+
 @app.get("/session/{sid}/events")
 async def session_events(sid: str, request: Request, from_: int = 0):
     s = HUB.get(sid)
@@ -1379,7 +1422,7 @@ def warm_up() -> None:
     try:
         s = Session("warmup", "گرم‌کردن")
         HUB.sessions["warmup"] = s
-        agent, _ = build_agent(s, _default_model(), FAST_TOOLSETS, "none")
+        agent, _ = build_agent(s, _default_model(), preset_toolsets(DEFAULT_TOOLSETS), "none")
         s.agent = agent
         HUB.warm = True
         print("jarvisd: warm agent ready (%s)" % _default_model(), flush=True)

@@ -61,6 +61,8 @@ public class MainActivity extends Activity {
     private String model = "";
     /** Which persona this session runs on ("" = the daemon's default). */
     private String persona = "";
+    /** Tool preset for this conversation: fast | smart | full ("" = daemon default). */
+    private String toolsetPreset = "";
     private String effort = "none";
     private String catalogJson = "";
     private long lastNotify;
@@ -307,6 +309,7 @@ public class MainActivity extends Activity {
             }
             effort = res.optString("reasoning", effort);
             persona = res.optString("persona", "");
+            toolsetPreset = res.optString("toolsets", "");
             notifyList();
             attachStream();
         }, msg -> {
@@ -668,6 +671,7 @@ public class MainActivity extends Activity {
                 "شخصیت‌ها",
                 "چه یاد گرفت",
                 "ابزارها و مهارت‌ها",
+                "حالت ابزار این گفتگو",
                 "زمان‌بندی",
                 "سرویس‌ها و لاگ‌ها",
                 "پرووایدرها و کلیدها",
@@ -697,24 +701,27 @@ public class MainActivity extends Activity {
                             Panels.tools(this);
                             break;
                         case 5:
-                            Panels.cron(this);
+                            Panels.toolsets(this, sessionId, toolsetPreset, () -> { });
                             break;
                         case 6:
-                            Panels.services(this);
+                            Panels.cron(this);
                             break;
                         case 7:
-                            providersDialog();
+                            Panels.services(this);
                             break;
                         case 8:
-                            settings();
+                            providersDialog();
                             break;
                         case 9:
-                            setupWizard();
+                            settings();
                             break;
                         case 10:
-                            Panels.voice(this);
+                            setupWizard();
                             break;
                         case 11:
+                            Panels.voice(this);
+                            break;
+                        case 12:
                             ttsOn = !ttsOn;
                             prefs.edit().putBoolean("tts", ttsOn).apply();
                             toast(ttsOn ? "صدا روشن شد" : "صدا خاموش شد");

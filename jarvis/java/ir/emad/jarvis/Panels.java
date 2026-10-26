@@ -628,6 +628,43 @@ final class Panels {
         Sheet.show(a, "مدل صدا", box);
     }
 
+    // -------------------------------------------------------------------- toolsets --
+    /**
+     * How much of itself the agent may use for this conversation. The old build silently ran a
+     * seven-tool subset, which is why it could not search the web or write code; the presets
+     * make that a visible choice instead of a hidden default.
+     */
+    static void toolsets(Activity a, String sessionId, String current, Done after) {
+        String now = current == null || current.isEmpty() ? "smart" : current;
+        LinearLayout box = Ui.col(a);
+        box.addView(Sheet.section(a, "حالت ابزار برای این گفتگو"), Ui.fill());
+        String[][] rows = {
+                {"fast", "سریع", "گفتگو و کنترل گوشی؛ بدون وب و بدون کد"},
+                {"smart", "هوشمند", "وب، کد، حافظه، مهارت، تیم‌سازی و زمان‌بندی"},
+                {"full", "کامل", "همه‌چیز: مرورگر، تصویر، کامپیوتر و صدا"},
+        };
+        for (String[] row : rows) {
+            boolean on = row[0].equals(now);
+            box.addView(Sheet.item(a, row[1] + "  (" + row[0] + ")",
+                    on ? "فعال · " + row[2] : row[2], on ? Ui.ACCENT : null,
+                    () -> {
+                        if (sessionId == null || sessionId.isEmpty()) {
+                            toast(a, "اول یک گفتگو بساز");
+                            return;
+                        }
+                        Api.post("/session/" + sessionId + "/toolsets",
+                                Api.body("preset", row[0]), 30000, res -> {
+                                    toast(a, "حالت: " + row[1]);
+                                    if (after != null) {
+                                        after.on();
+                                    }
+                                }, msg -> toast(a, "نشد: " + msg));
+                    }), Ui.fill());
+            box.addView(Sheet.divider(a), Ui.fill());
+        }
+        Sheet.show(a, "حالت ابزار", box);
+    }
+
     // --------------------------------------------------------------------- helpers --
     /** Our own loading panel: a dark rounded card with one line, not the system spinner box. */
     private static AlertDialog busy(Activity a, String text) {
