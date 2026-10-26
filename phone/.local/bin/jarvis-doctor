@@ -33,11 +33,15 @@ FIX=0
 QUIET=0
 MANUAL=""
 NMANUAL=0
+# Score: every check that ran and how many were healthy. The verdict quotes both, so "all good"
+# and "nothing was checked" can never look the same.
+CHECKS=0
+PASSED=0
 
 say() { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
-good() { [ "$QUIET" -eq 1 ] || printf '✓ %s\n' "$*"; }
-bad() { printf '✗ %s\n' "$*"; }
-todo() { printf '! %s\n' "$*"; }
+good() { CHECKS=$((CHECKS + 1)); PASSED=$((PASSED + 1)); [ "$QUIET" -eq 1 ] || printf '✓ %s\n' "$*"; }
+bad() { CHECKS=$((CHECKS + 1)); printf '✗ %s\n' "$*"; }
+todo() { CHECKS=$((CHECKS + 1)); printf '! %s\n' "$*"; }
 act() { printf '  → %s\n' "$*"; }
 did() { [ "$QUIET" -eq 1 ] || printf '  + %s\n' "$*"; }
 
@@ -245,6 +249,10 @@ if [ "$RISH_OK" -eq 1 ]; then
   else
     good "Shizuku (rish) جواب می‌دهد — کنترل گوشی کار می‌کند (هر اکشن ~۳ ثانیه، نه ۹۲ms)"
   fi
+elif [ "$ADB_OK" -eq 1 ]; then
+  # Shizuku is a *fallback*, not a requirement: with adb (or the app's own hands) answering it
+  # adds nothing, so it must not count against the score and must not appear as a remaining task.
+  say "- Shizuku خاموش است (لازم هم نیست: adb یا دست‌های اپ کار را انجام می‌دهند)"
 else
   if have rish; then
     todo "Shizuku نصب است ولی rish جواب نمی‌دهد (سرویس Shizuku خاموش است؟)"
@@ -360,8 +368,119 @@ case "$BATT" in
     ;;
 esac
 
+# --------------------------------------------------------- 7. what the console can do --
+# The sections above answer "is it installed". This one answers "does it actually work": the
+# hands, the tools, the bots, research, voice and the model. Each line is measured, never assumed.
+say ""
+say "── توانایی‌ها ──"
+J="http://127.0.0.1:8780"
+
+BRIDGE_JSON=$(curl -s -m 3 "http://127.0.0.1:8791/ping" 2>/dev/null || :)
+if [ -n "$BRIDGE_JSON" ]; then
+  case "$BRIDGE_JSON" in
+    *'"a11y":true'*)
+      good "دست‌های جارویس: سرویس دسترسی‌پذیری روشن است (لمس/سوایپ/تایپ بدون adb)" ;;
+    *)
+      todo "دست‌های جارویس: پل اپ هست ولی سرویس دسترسی‌پذیری خاموش است"
+      act "اپ جارویس → منو → کنترل گوشی → روشن‌کردن سرویس (تنظیمات اندروید)"
+      manual "سرویس دسترسی‌پذیری" ;;
+  esac
+else
+  todo "دست‌های جارویس: پل اپ جواب نمی‌دهد — اپ جارویس باز نیست"
+  act "اپ جارویس را یک‌بار باز کن؛ پل با باز شدن اپ بالا می‌آید و اکشن‌ها سریع‌تر می‌شوند"
+fi
+
+MCP_JSON=$(curl -s -m 8 "$J/mcp" 2>/dev/null || :)
+case "$MCP_JSON" in
+  ''|*'"detail"'*)
+    todo "ابزارهای MCP: فهرست نیامد (دیمن خواب است؟)" ;;
+  '[]')
+    say "- ابزارهای MCP: سروری وصل نیست (هر وقت خواستی از پنل ابزارها اضافه کن)" ;;
+  *)
+    MCPN=$(printf '%s' "$MCP_JSON" | tr -cd '{' | wc -c | tr -d ' ')
+    if grep -q "mcp discovery ready" "$HOME/.hermes/jarvis.log" 2>/dev/null; then
+      good "ابزارهای MCP: $MCPN سرور وصل است و ابزارهایشان در ایجنت ثبت شده"
+    else
+      todo "ابزارهای MCP: $MCPN سرور وصل است ولی discovery هنوز اجرا نشده"
+      act "سرویس را ری‌استارت کن: hermes-svc restart jarvis"
+    fi ;;
+esac
+
+BOTS_JSON=$(curl -s -m 10 "$J/bots" 2>/dev/null || :)
+case "$BOTS_JSON" in
+  ''|*'"detail"'*)
+    say "- بات‌ها: فهرست نیامد" ;;
+  *)
+    BOTN=$(printf '%s' "$BOTS_JSON" | tr -cd '{' | wc -c | tr -d ' ')
+    BOTISO=$(printf '%s' "$BOTS_JSON" | grep -o '"isolated":true' | wc -l | tr -d ' ')
+    if [ "${BOTN:-0}" -ge 1 ]; then
+      good "بات‌ها: $BOTN بات، $BOTISO تای‌شان با حافظهٔ مستقل"
+    else
+      todo "بات‌ها: هیچ باتی ساخته نشده"
+    fi ;;
+esac
+
+RES_JSON=$(curl -s -m 8 "$J/research" 2>/dev/null || :)
+case "$RES_JSON" in
+  ''|*'"detail"'*)
+    todo "پژوهش: مسیر /research جواب نداد" ;;
+  *)
+    RESN=$(printf '%s' "$RES_JSON" | tr -cd '{' | wc -c | tr -d ' ')
+    good "پژوهش: آماده است ($RESN اجرای قبلی ثبت شده)" ;;
+esac
+
+VOICE_JSON=$(curl -s -m 10 "$J/voice/status" 2>/dev/null || :)
+case "$VOICE_JSON" in
+  ''|*'"detail"'*)
+    todo "صدا: وضعیت نیامد" ;;
+  *)
+    VM=$(printf '%s' "$VOICE_JSON" | sed -n 's/.*"stt_model":"\([^"]*\)".*/\1/p')
+    VT=$(printf '%s' "$VOICE_JSON" | sed -n 's/.*"tts_model":"\([^"]*\)".*/\1/p')
+    if [ -n "$VT" ]; then
+      good "صدا: شنیدن با $VM · گفتن با $VT"
+    else
+      todo "صدا: مدلی انتخاب نشده (پنل صدا)"
+    fi ;;
+esac
+
+PROV_JSON=$(curl -s -m 20 "$J/providers" 2>/dev/null || :)
+case "$PROV_JSON" in
+  ''|*'"detail"'*)
+    todo "مدل‌ها: فهرست پرووایدرها نیامد" ;;
+  *)
+    CUR=$(printf '%s' "$PROV_JSON" | sed -n 's/.*"current":{"provider":"\([^"]*\)","model":"\([^"]*\)".*/\1 \2/p')
+    REACH=$(printf '%s' "$PROV_JSON" | grep -o '"reachable":true' | wc -l | tr -d ' ')
+    if [ -n "$CUR" ]; then
+      if [ "${REACH:-0}" -ge 1 ]; then
+        good "مدل فعال: $CUR · $REACH پرووایدر جواب می‌دهد"
+      else
+        todo "مدل فعال: $CUR ولی هیچ پرووایدری جواب نداده — VPN یا کلید را ببین"
+        act "اپ → پرووایدرها → «بهترین را خودکار پیدا کن»"
+      fi
+    else
+      todo "مدل فعال: انتخاب نشده"
+    fi ;;
+esac
+
+FREE=$(df -P -k "$HOME" 2>/dev/null | awk 'NR==2 {printf "%d", $4/1024}')
+case "$FREE" in
+  ''|*[!0-9]*) FREE="" ;;
+esac
+if [ -n "$FREE" ]; then
+  if [ "$FREE" -ge 500 ]; then
+    good "فضای ذخیره: ${FREE}MB آزاد"
+  else
+    todo "فضای ذخیره: فقط ${FREE}MB آزاد (زیر ۵۰۰MB) — لاگ‌ها را پاک کن"
+    act "rm ~/.hermes/*.log.1 && hermes-svc restart jarvis"
+    manual "آزادکردن فضا"
+  fi
+fi
+
 # ---------------------------------------------------------------------- the verdict --
 printf '\n'
+if [ "$CHECKS" -gt 0 ]; then
+  printf 'امتیاز: %s از %s بررسی سالم بود.\n' "$PASSED" "$CHECKS"
+fi
 if [ "$NMANUAL" -eq 0 ]; then
   printf 'آماده است — اپ جارویس را باز کن و پیام اول را بفرست.\n'
   exit 0
