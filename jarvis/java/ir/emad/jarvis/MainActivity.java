@@ -701,6 +701,7 @@ public class MainActivity extends Activity {
                 "پژوهش",
                 "بات‌ها",
                 "ابزارها و مهارت‌ها",
+                "پروژه و کد",
                 "حالت ابزار این گفتگو",
                 "زمان‌بندی",
                 "سرویس‌ها و لاگ‌ها",
@@ -738,32 +739,35 @@ public class MainActivity extends Activity {
                             Panels.tools(this);
                             break;
                         case 7:
-                            Panels.toolsets(this, sessionId, toolsetPreset, () -> { });
+                            Panels.project(this);
                             break;
                         case 8:
-                            Panels.cron(this);
+                            Panels.toolsets(this, sessionId, toolsetPreset, () -> { });
                             break;
                         case 9:
-                            Panels.services(this);
+                            Panels.cron(this);
                             break;
                         case 10:
-                            providersDialog();
+                            Panels.services(this);
                             break;
                         case 11:
-                            settings();
+                            providersDialog();
                             break;
                         case 12:
-                            setupWizard();
+                            settings();
                             break;
                         case 13:
-                            Panels.voice(this);
+                            setupWizard();
                             break;
                         case 14:
+                            Panels.voice(this);
+                            break;
+                        case 15:
                             ttsOn = !ttsOn;
                             prefs.edit().putBoolean("tts", ttsOn).apply();
                             toast(ttsOn ? "صدا روشن شد" : "صدا خاموش شد");
                             break;
-                        case 15:
+                        case 16:
                             Panels.hands(this);
                             break;
                         default:

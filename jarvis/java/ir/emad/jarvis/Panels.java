@@ -8,6 +8,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.TextView;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -995,6 +996,255 @@ final class Panels {
         if (a instanceof MainActivity) {
             ((MainActivity) a).toast(msg);
         }
+    }
+
+    // -------------------------------------------------------------------- project --
+    /**
+     * Project / code mode: the folder the agent works in, its files, running a command in it,
+     * and git. Every destructive step (run, commit) goes through {@link Sheet#confirm} — the
+     * daemon refuses those without `approve:true`, so the confirm sheet is not decoration.
+     */
+    static void project(Activity a) {
+        AlertDialog spin = busy(a, "پوشهٔ کار…");
+        Api.get("/project", 20000, res -> {
+            spin.dismiss();
+            LinearLayout box = Ui.col(a);
+            String dir = res.optString("dir", "");
+            box.addView(Sheet.section(a, "پوشهٔ کار"), Ui.fill());
+            box.addView(Sheet.item(a, shortDir(dir),
+                    res.optInt("entries", 0) + " فایل" + gitLine(res.optJSONObject("git")),
+                    null, () -> openDir(a)), Ui.fill());
+            box.addView(Sheet.divider(a), Ui.fill());
+            box.addView(Sheet.item(a, "فایل‌ها", "دیدن و کپی کردن محتوا", null,
+                    () -> tree(a, ".")), Ui.fill());
+            box.addView(Sheet.item(a, "اجرای دستور", "با تأیید، داخل همین پوشه", Ui.AMBER,
+                    () -> runDialog(a)), Ui.fill());
+            box.addView(Sheet.item(a, "گیت", "وضعیت، تاریخچه، دیف، کامیت", null,
+                    () -> gitMenu(a)), Ui.fill());
+            box.addView(Sheet.item(a, "تغییر پوشه", "مسیری زیر خانهٔ ترمکس", null,
+                    () -> openDir(a)), Ui.fill());
+            Sheet.show(a, "پروژه", box);
+        }, msg -> {
+            spin.dismiss();
+            toast(a, "پروژه نیامد: " + msg);
+        });
+    }
+
+    private static String shortDir(String dir) {
+        if (dir == null || dir.isEmpty()) {
+            return "انتخاب نشده";
+        }
+        int cut = dir.lastIndexOf('/');
+        return cut > 0 ? dir.substring(cut + 1) : dir;
+    }
+
+    private static String gitLine(JSONObject git) {
+        if (git == null || !git.optBoolean("repo", false)) {
+            return " · گیت ندارد";
+        }
+        String branch = git.optString("branch", "");
+        int dirty = git.optInt("dirty", 0);
+        return " · " + (branch.isEmpty() ? "master" : branch)
+                + (dirty > 0 ? " · " + dirty + " تغییر" : " · پاک");
+    }
+
+    private static void openDir(Activity a) {
+        LinearLayout box = Ui.col(a);
+        box.setPadding(Ui.dp(a, 18), Ui.dp(a, 4), Ui.dp(a, 18), Ui.dp(a, 12));
+        final EditText path = Ui.input(a, "~/projects/app");
+        box.addView(Sheet.section(a, "مسیر پوشه"), Ui.fill());
+        box.addView(path, Ui.fill());
+        box.addView(Sheet.item(a, "باز کن", null, Ui.ACCENT, () -> {
+            String dir = path.getText().toString().trim();
+            if (dir.isEmpty()) {
+                toast(a, "مسیر لازم است");
+                return;
+            }
+            Api.post("/project/open", Api.body("dir", dir), 20000, res -> {
+                if (!res.optBoolean("ok", false)) {
+                    toast(a, "باز نشد: " + res.optString("error", "?"));
+                    return;
+                }
+                toast(a, "پوشه عوض شد");
+                project(a);
+            }, msg -> toast(a, "باز نشد: " + msg));
+        }), Ui.fill());
+        Sheet.show(a, "تغییر پوشه", box);
+    }
+
+    private static void tree(Activity a, String path) {
+        Api.get("/project/tree?path=" + android.net.Uri.encode(path), 20000, res -> {
+            LinearLayout box = Ui.col(a);
+            JSONArray items = res.optJSONArray("items");
+            box.addView(Sheet.section(a, ".".equals(path) ? "ریشهٔ پروژه" : path), Ui.fill());
+            if (!".".equals(path)) {
+                String up = path.lastIndexOf('/') > 0
+                        ? path.substring(0, path.lastIndexOf('/')) : ".";
+                box.addView(Sheet.item(a, "بازگشت به بالا", up, null, () -> tree(a, up)), Ui.fill());
+            }
+            for (int i = 0; items != null && i < items.length(); i++) {
+                JSONObject it = items.optJSONObject(i);
+                if (it == null) {
+                    continue;
+                }
+                final String rel = it.optString("path", "");
+                final boolean isDir = it.optBoolean("dir", false);
+                box.addView(Sheet.item(a, it.optString("name", rel),
+                        isDir ? "پوشه" : bytes(it.optLong("size", 0)), null,
+                        isDir ? () -> tree(a, rel) : () -> file(a, rel)), Ui.fill());
+            }
+            if (items == null || items.length() == 0) {
+                box.addView(Sheet.item(a, "خالی است", null, null, null), Ui.fill());
+            }
+            Sheet.show(a, "فایل‌ها", box);
+        }, msg -> toast(a, "فایل‌ها نیامد: " + msg));
+    }
+
+    private static String bytes(long n) {
+        if (n < 1024) {
+            return n + " بایت";
+        }
+        return String.format(java.util.Locale.US, "%.1f کیلوبایت", n / 1024f);
+    }
+
+    private static void file(Activity a, String path) {
+        Api.get("/project/file?path=" + android.net.Uri.encode(path), 20000, res -> {
+            if (!res.optBoolean("ok", false)) {
+                toast(a, "فایل نیامد: " + res.optString("error", "?"));
+                return;
+            }
+            LinearLayout box = Ui.col(a);
+            box.setPadding(Ui.dp(a, 18), Ui.dp(a, 4), Ui.dp(a, 18), Ui.dp(a, 12));
+            if (res.optBoolean("binary", false)) {
+                box.addView(Sheet.item(a, "فایل دودویی است", path, null, null), Ui.fill());
+                Sheet.show(a, path, box);
+                return;
+            }
+            final String text = res.optString("text", "");
+            TextView code = Ui.mono(a, text, 12f, Ui.TEXT);
+            code.setPadding(0, Ui.dp(a, 6), 0, Ui.dp(a, 10));
+            code.setTextIsSelectable(true);
+            box.addView(code, Ui.fill());
+            box.addView(Sheet.divider(a), Ui.fill());
+            box.addView(Sheet.item(a, "کپی در کلیپ‌بورد", bytes(text.length()), null, () -> {
+                // A foreground activity may set the clipboard directly; only reading needs Clip.
+                android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                        a.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+                if (cm != null) {
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("jarvis", text));
+                    toast(a, "کپی شد");
+                }
+            }), Ui.fill());
+            Sheet.show(a, path, box);
+        }, msg -> toast(a, "فایل نیامد: " + msg));
+    }
+
+    private static void runDialog(Activity a) {
+        LinearLayout box = Ui.col(a);
+        box.setPadding(Ui.dp(a, 18), Ui.dp(a, 4), Ui.dp(a, 18), Ui.dp(a, 12));
+        final EditText cmd = Ui.input(a, "python3 main.py");
+        box.addView(Sheet.section(a, "دستور"), Ui.fill());
+        box.addView(cmd, Ui.fill());
+        box.addView(Sheet.item(a, "ادامه", "بعد از این یک تأیید می‌آید", Ui.AMBER, () -> {
+            String line = cmd.getText().toString().trim();
+            if (line.isEmpty()) {
+                toast(a, "دستور خالی است");
+                return;
+            }
+            Sheet.confirm(a, "اجرا در پوشهٔ پروژه", line, "اجرا کن", Ui.AMBER,
+                    () -> run(a, line));
+        }), Ui.fill());
+        Sheet.show(a, "اجرای دستور", box);
+    }
+
+    private static void run(Activity a, String cmd) {
+        AlertDialog spin = busy(a, "در حال اجرا…");
+        Api.post("/project/run", Api.body("cmd", cmd, "approve", true), 120000, res -> {
+            spin.dismiss();
+            StringBuilder out = new StringBuilder();
+            if (!res.optString("stdout", "").isEmpty()) {
+                out.append(res.optString("stdout"));
+            }
+            if (!res.optString("stderr", "").isEmpty()) {
+                out.append(out.length() > 0 ? "\n" : "").append(res.optString("stderr"));
+            }
+            String head = (res.optBoolean("ok", false) ? "کد " : "خطا، کد ")
+                    + res.optInt("rc", 0) + " · " + res.optInt("ms", 0) + "ms"
+                    + (res.optBoolean("timed_out", false) ? " · زمان تمام شد" : "");
+            LinearLayout box = Ui.col(a);
+            box.setPadding(Ui.dp(a, 18), Ui.dp(a, 4), Ui.dp(a, 18), Ui.dp(a, 12));
+            box.addView(Ui.text(a, head, 12f,
+                    res.optBoolean("ok", false) ? Ui.GREEN : Ui.RED, false), Ui.fill());
+            TextView text = Ui.mono(a, out.length() == 0 ? "(بی‌خروجی)" : out.toString(), 12f, Ui.TEXT);
+            text.setPadding(0, Ui.dp(a, 8), 0, 0);
+            text.setTextIsSelectable(true);
+            box.addView(text, Ui.fill());
+            Sheet.show(a, cmd, box);
+        }, msg -> {
+            spin.dismiss();
+            toast(a, "اجرا نشد: " + msg);
+        });
+    }
+
+    private static void gitMenu(Activity a) {
+        LinearLayout box = Ui.col(a);
+        box.addView(Sheet.item(a, "وضعیت", "git status", null,
+                () -> git(a, "status", "")), Ui.fill());
+        box.addView(Sheet.item(a, "تاریخچه", "۲۰ کامیت آخر", null,
+                () -> git(a, "log", "")), Ui.fill());
+        box.addView(Sheet.item(a, "تغییرات", "git diff", null,
+                () -> git(a, "diff", "")), Ui.fill());
+        box.addView(Sheet.item(a, "کامیت", "پیام می‌پرسد و تأیید لازم دارد", Ui.AMBER,
+                () -> commitDialog(a)), Ui.fill());
+        Sheet.show(a, "گیت", box);
+    }
+
+    private static void commitDialog(Activity a) {
+        LinearLayout box = Ui.col(a);
+        box.setPadding(Ui.dp(a, 18), Ui.dp(a, 4), Ui.dp(a, 18), Ui.dp(a, 12));
+        final EditText msg = Ui.input(a, "پیام کامیت");
+        box.addView(Sheet.section(a, "پیام"), Ui.fill());
+        box.addView(msg, Ui.fill());
+        box.addView(Sheet.item(a, "ثبت کامیت", null, Ui.AMBER, () -> {
+            String line = msg.getText().toString().trim();
+            if (line.isEmpty()) {
+                toast(a, "پیام لازم است");
+                return;
+            }
+            Sheet.confirm(a, "کامیت", line, "کامیت کن", Ui.AMBER, () -> git(a, "commit", line));
+        }), Ui.fill());
+        Sheet.show(a, "کامیت", box);
+    }
+
+    private static void git(Activity a, String action, String message) {
+        AlertDialog spin = busy(a, "گیت…");
+        JSONObject payload = Api.body("action", action, "approve", true);
+        if (!message.isEmpty()) {
+            try {
+                payload.put("message", message);
+            } catch (org.json.JSONException ignored) {
+                // put only throws on a null key; the message is plain text
+            }
+        }
+        Api.post("/project/git", payload, 60000, res -> {
+            spin.dismiss();
+            String out = res.optString("stdout", "");
+            if (!res.optString("stderr", "").trim().isEmpty()) {
+                out += (out.isEmpty() ? "" : "\n") + res.optString("stderr", "");
+            }
+            LinearLayout box = Ui.col(a);
+            box.setPadding(Ui.dp(a, 18), Ui.dp(a, 4), Ui.dp(a, 18), Ui.dp(a, 12));
+            box.addView(Ui.text(a, "کد " + res.optInt("rc", 0), 12f,
+                    res.optInt("rc", 0) == 0 ? Ui.GREEN : Ui.RED, false), Ui.fill());
+            TextView text = Ui.mono(a, out.trim().isEmpty() ? "(بی‌خروجی)" : out, 12f, Ui.TEXT);
+            text.setPadding(0, Ui.dp(a, 8), 0, 0);
+            text.setTextIsSelectable(true);
+            box.addView(text, Ui.fill());
+            Sheet.show(a, "گیت " + action, box);
+        }, msg -> {
+            spin.dismiss();
+            toast(a, "گیت نشد: " + msg);
+        });
     }
 
     /** Wrap a machine string (cron expression, URL, id) so bidi cannot reorder it. */
