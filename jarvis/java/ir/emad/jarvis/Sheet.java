@@ -138,6 +138,43 @@ final class Sheet {
         return icon;
     }
 
+    /**
+     * The same row with a second action on a long press — tap opens, hold offers the rest
+     * (delete, rename). Nothing in a list loses its primary meaning to make room for a
+     * destructive one.
+     */
+    static View item(Activity a, String title, String sub, Integer dotColor, Runnable tap,
+                     Runnable hold) {
+        View row = item(a, title, sub, dotColor, tap);
+        if (hold != null) {
+            row.setOnLongClickListener(v -> {
+                dismiss();
+                hold.run();
+                return true;
+            });
+        }
+        return row;
+    }
+
+    /**
+     * Ask before something irreversible, in the app's own type instead of a centred system
+     * dialog. `onYes` runs only after the sheet is gone, so a refresh inside it is free.
+     */
+    static void confirm(Activity a, String title, String message, String yes, int tone,
+                        Runnable onYes) {
+        LinearLayout box = Ui.col(a);
+        TextView body = Ui.text(a, message, 13f, Ui.DIM, false);
+        body.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+        body.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_START);
+        body.setLineSpacing(Ui.dp(a, 4), 1f);
+        body.setPadding(Ui.dp(a, 18), Ui.dp(a, 2), Ui.dp(a, 18), Ui.dp(a, 10));
+        box.addView(body, Ui.fill());
+        box.addView(divider(a), Ui.fill());
+        box.addView(item(a, yes, null, tone, onYes), Ui.fill());
+        box.addView(item(a, "بی‌خیال", null, null, () -> { }), Ui.fill());
+        show(a, title, box);
+    }
+
     /** Hairline between rows, inset like the text so the list reads as one column. */
     static View divider(Activity a) {
         View line = new View(a);

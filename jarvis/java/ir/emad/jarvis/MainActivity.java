@@ -717,7 +717,7 @@ public class MainActivity extends Activity {
                             openSession("");
                             break;
                         case 1:
-                            sessionsDialog();
+                            openChats();
                             break;
                         case 2:
                             Panels.personas(this, sessionId, persona, () -> {
@@ -1202,32 +1202,19 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void sessionsDialog() {
-        Api.get("/sessions", 15000, res -> {
-            JSONArray arr = res.optJSONArray("sessions") != null
-                    ? res.optJSONArray("sessions") : new JSONArray();
-            final List<String> ids = new ArrayList<>();
-            final List<String> labels = new ArrayList<>();
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject s = arr.optJSONObject(i);
-                if (s == null) {
-                    continue;
-                }
-                ids.add(s.optString("id", ""));
-                String title = s.optString("title", "بدون عنوان");
-                labels.add(title + "  ·  " + s.optInt("turns", 0) + " نوبت"
-                        + (s.optBoolean("busy") ? "  ·  در حال اجرا" : ""));
-            }
-            labels.add(0, "گفتگوی تازه");
-            ids.add(0, "");
-            Sheet.rows(this, "گفتگوها", labels, which -> {
-                String id = ids.get(which);
-                prefs.edit().putString("session", id).apply();
-                lastSeq = 0;
-                openSession(id);
-            });
-        }, msg -> toast("لیست نیامد: " + msg));
+    /**
+     * The conversations panel. It reopens itself after a delete so the list never shows a
+     * conversation that is already gone; if the deleted one was open, reopening it fails and
+     * the existing fallback starts a fresh session instead.
+     */
+    private void openChats() {
+        Panels.chats(this, sessionId, id -> {
+            prefs.edit().putString("session", id).apply();
+            lastSeq = 0;
+            openSession(id);
+        }, () -> openSession(sessionId));
     }
+
 
     private void pickModel() {
         if (catalogJson.isEmpty()) {

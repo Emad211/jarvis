@@ -1,0 +1,106 @@
+#!/data/data/com.termux/files/usr/bin/env python
+"""jarvis-project — one-shot CLI over /project on the daemon (the agent's own hand).
+
+Same features the console panel has, as one command per line, JSON out:
+
+    jarvis-project status
+    jarvis-project open ~/my-app
+    jarvis-project ls [path]           # tree, depth 1
+    jarvis-project cat <path>
+    jarvis-project write <path> <text|->
+    jarvis-project run <cmd>
+    jarvis-project git <status|log|diff|commit|init> [message]
+
+JARVISD=http://127.0.0.1:8780 overrides the daemon address.
+
+`run`, `git commit` and `git init` send `approve: true`: this CLI *is* the approved hand —
+the app's panel is where a human approves, and the daemon logs every command either way.
+"""
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+BASE = os.environ.get("JARVISD", "http://127.0.0.1:8780").rstrip("/")
+TIMEOUT = float(os.environ.get("JARVIS_TIMEOUT", "120"))
+
+
+def call(method, path, body=None, query=None):
+    url = BASE + path
+    if query:
+        url += "?" + urllib.parse.urlencode(query)
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            return json.loads(resp.read().decode("utf-8", "ignore"))
+    except urllib.error.HTTPError as exc:      # 409/4xx carry a JSON body worth printing
+        try:
+            return json.loads(exc.read().decode("utf-8", "ignore"))
+        except Exception:                      # noqa: BLE001
+            return {"ok": False, "error": "http_%s" % exc.code, "detail": str(exc)}
+    except Exception as exc:                   # noqa: BLE001
+        return {"ok": False, "error": "unreachable", "detail": str(exc)}
+
+
+def usage():
+    print(__doc__.strip())
+    return 2
+
+
+def main(argv):
+    if len(argv) < 2:
+        return usage()
+    cmd, args = argv[1].lower(), argv[2:]
+
+    if cmd == "status":
+        out = call("GET", "/project")
+
+    elif cmd == "open":
+        if not args:
+            return usage()
+        out = call("POST", "/project/open", {"dir": args[0]})
+
+    elif cmd == "ls":
+        query = {"path": args[0] if args else ".", "depth": "1"}
+        if len(args) > 1:
+            query["depth"] = args[1]
+        out = call("GET", "/project/tree", query=query)
+
+    elif cmd == "cat":
+        if not args:
+            return usage()
+        out = call("GET", "/project/file", query={"path": args[0]})
+
+    elif cmd == "write":
+        if len(args) < 2:
+            return usage()
+        path, payload = args[0], args[1]
+        if payload == "-":
+            payload = sys.stdin.read()
+        out = call("POST", "/project/file", {"path": path, "text": payload})
+
+    elif cmd == "run":
+        if not args:
+            return usage()
+        out = call("POST", "/project/run", {"cmd": " ".join(args), "approve": True})
+
+    elif cmd == "git":
+        action = args[0] if args else "status"
+        body = {"action": action, "approve": True}
+        if len(args) > 1:
+            body["message"] = " ".join(args[1:])
+        out = call("POST", "/project/git", body)
+
+    else:
+        return usage()
+
+    print(json.dumps(out, ensure_ascii=False, indent=1))
+    return 0 if out.get("ok") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

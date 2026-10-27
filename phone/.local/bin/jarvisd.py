@@ -694,7 +694,7 @@ def _set_persona(sid: str, pid: str) -> bool:
     return True
 for _mod_name in ("jarvisd_personas", "jarvisd_tools", "jarvisd_ops", "jarvisd_voice",
                   "jarvisd_research", "jarvisd_bots", "jarvisd_automation",
-                  "jarvisd_sessions"):
+                  "jarvisd_sessions", "jarvisd_project"):
     try:
         _mod = __import__(_mod_name)
         _mod.register(app, CTX)

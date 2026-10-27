@@ -26,7 +26,64 @@ final class Panels {
         void on();
     }
 
+    /** Hands a chosen session id back to the chat screen ("" means "start a new one"). */
+    interface Open {
+        void to(String sessionId);
+    }
+
     private Panels() {
+    }
+
+    // -------------------------------------------------------------------- chats --
+    /**
+     * Past conversations. Tap switches to one, hold offers the destructive actions — the list
+     * is the daemon's own `/sessions`, so a conversation deleted here is deleted on disk.
+     */
+    static void chats(Activity a, String current, Open open, Done after) {
+        Api.get("/sessions", 15000, res -> {
+            JSONArray arr = res.optJSONArray("sessions");
+            int n = arr == null ? 0 : arr.length();
+            LinearLayout box = Ui.col(a);
+            box.addView(Sheet.section(a, n == 0 ? "هنوز گفتگویی نیست" : n + " گفتگو"), Ui.fill());
+            box.addView(Sheet.item(a, "گفتگوی تازه", "شروع از صفر", Ui.ACCENT,
+                    () -> open.to("")), Ui.fill());
+            box.addView(Sheet.divider(a), Ui.fill());
+            for (int i = 0; i < n; i++) {
+                JSONObject s = arr.optJSONObject(i);
+                if (s == null) {
+                    continue;
+                }
+                final String id = s.optString("id", "");
+                final String title = s.optString("title", "").isEmpty()
+                        ? "بدون عنوان" : s.optString("title", "");
+                String model = ChatAdapter.shortModel(s.optString("model", ""));
+                String sub = s.optInt("turns", 0) + " نوبت"
+                        + (model.isEmpty() ? "" : " · " + model)
+                        + (s.optBoolean("busy") ? " · در حال اجرا" : "");
+                String when = Ui.ago(s.optDouble("updated", 0));
+                if (!when.isEmpty()) {
+                    sub += " · " + when;
+                }
+                box.addView(Sheet.item(a, title, sub, id.equals(current) ? Ui.ACCENT : null,
+                        () -> open.to(id), () -> chatActions(a, id, title, after)), Ui.fill());
+                box.addView(Sheet.divider(a), Ui.fill());
+            }
+            Sheet.show(a, "گفتگوها", box);
+        }, msg -> toast(a, "لیست نیامد: " + msg));
+    }
+
+    private static void chatActions(Activity a, String id, String title, Done after) {
+        LinearLayout box = Ui.col(a);
+        box.addView(Sheet.item(a, "حذف این گفتگو", title, Ui.RED, () ->
+                Sheet.confirm(a, "حذف گفتگو",
+                        "«" + title + "» و همهٔ پیام‌هایش پاک می‌شود. برگشتی ندارد.",
+                        "حذف کن", Ui.RED, () -> Api.delete("/session/" + id, 20000, res -> {
+                            toast(a, "پاک شد");
+                            if (after != null) {
+                                after.on();
+                            }
+                        }, msg -> toast(a, "پاک نشد: " + msg)))), Ui.fill());
+        Sheet.show(a, title, box);
     }
 
     // ------------------------------------------------------------------- personas --

@@ -250,4 +250,28 @@ final class Ui {
         f.setTimeZone(java.util.TimeZone.getTimeZone("Asia/Tehran"));
         return f.format(new java.util.Date(millis));
     }
+
+    /** Relative time for lists. A list of dates is a puzzle; "3 روز پیش" is an answer. */
+    static String ago(double epochSeconds) {
+        if (epochSeconds <= 0) {
+            return "";
+        }
+        long secs = (long) (System.currentTimeMillis() / 1000.0 - epochSeconds);
+        if (secs < 0) {
+            return clock((long) (epochSeconds * 1000));
+        }
+        if (secs < 90) {
+            return "الان";
+        }
+        if (secs < 3600) {
+            return (secs / 60) + " دقیقه پیش";
+        }
+        if (secs < 86400) {
+            return (secs / 3600) + " ساعت پیش";
+        }
+        if (secs < 86400L * 30) {
+            return (secs / 86400) + " روز پیش";
+        }
+        return clock((long) (epochSeconds * 1000));
+    }
 }

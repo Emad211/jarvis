@@ -124,20 +124,26 @@ final class ChatAdapter extends BaseAdapter {
         }
         TextView text = Ui.text(ctx, "", 15.5f, Ui.TEXT, false);
         String prose = m.text.toString();
-        // Agent-side tools report attachments as `MEDIA:/abs/path` lines. The app cannot open
-        // an arbitrary Termux path, so the answer shows the fact and drops the path.
+        // Agent-side tools report attachments as `MEDIA:/abs/path` lines. The app cannot read a
+        // Termux path, but jarvisd can serve the screenshots it named itself, so those lines
+        // become real pictures and everything else is dropped.
         StringBuilder cleaned = new StringBuilder();
+        java.util.List<String> media = new java.util.ArrayList<>();
         int shots = 0;
         for (String line : prose.split("\n")) {
             if (line.trim().startsWith("MEDIA:")) {
                 shots++;
+                String url = mediaUrl(line.trim().substring(6).trim());
+                if (url != null && media.size() < 3) {
+                    media.add(url);
+                }
                 continue;
             }
             cleaned.append(line).append('\n');
         }
         if (shots > 0) {
             prose = cleaned.toString().trim();
-            if (prose.isEmpty()) {
+            if (prose.isEmpty() && media.isEmpty()) {
                 // No emoji here: the bundled Persian font has no glyph for 📷 and it renders
                 // as an empty box, which looks like a bug rather than a picture.
                 prose = shots == 1 ? "یک تصویر گرفته شد." : shots + " تصویر گرفته شد.";
@@ -149,6 +155,14 @@ final class ChatAdapter extends BaseAdapter {
         text.setLineSpacing(Ui.dp(ctx, 5), 1f);
         text.setPadding(0, Ui.dp(ctx, 8), 0, 0);
         body.addView(text);
+        for (String url : media) {
+            android.widget.ImageView shot = new android.widget.ImageView(ctx);
+            shot.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
+            shot.setBackground(Ui.round(ctx, Ui.SURFACE_2, 14));
+            body.addView(shot, Ui.margins(new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, Ui.dp(ctx, 240)), ctx, 0, 10, 0, 0));
+            Img.load(shot, url);
+        }
 
         LinearLayout foot = Ui.row(ctx);
         foot.setPadding(0, Ui.dp(ctx, 10), 0, 0);
@@ -253,6 +267,20 @@ final class ChatAdapter extends BaseAdapter {
     private static String clamp(String s, int max) {
         String v = s == null ? "" : s.replace("\r", "");
         return v.length() <= max ? v : v.substring(0, max) + "…";
+    }
+
+    /**
+     * A `MEDIA:` path becomes something the app may fetch, or null.
+     *
+     * The only pictures jarvisd serves are the screenshots it named itself in `~/shots`
+     * (`/media/{name}` insists on exactly that shape). A path outside that set belongs to
+     * Termux's private storage, which this app cannot read — showing the file name instead of a
+     * broken frame is the honest answer.
+     */
+    private static String mediaUrl(String path) {
+        int slash = path.lastIndexOf('/');
+        String name = slash >= 0 ? path.substring(slash + 1) : path;
+        return name.matches("jv_[0-9a-f]{10,16}\\.png") ? "/media/" + name : null;
     }
 
     private static String firstToken(int ms) {
