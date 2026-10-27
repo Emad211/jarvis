@@ -81,6 +81,15 @@ One repo for both halves of the system. Background history: `../hermes-handoff/H
   costs 7–10 ms, a non-match 7 ms. The `app_open` poller still works as the fallback and shares
   the debounce so a push never double-fires. Ring buffer of 200 events on
   `GET /automation/events` (memory only, resets on restart).
+- **"Stop" means stop, and it took a hard cancel.** `/session/{sid}/cancel` used to call
+  `agent.interrupt()` — a *soft* interrupt that only lands at the next tool boundary, so a
+  generating turn kept running for minutes while the UI said «متوقف شد» (measured 2026-10-27).
+  It now passes `hard_cancel=True` and the turn ends in ~300 ms with `cancelled: true`. A
+  cancelled turn is stored as «متوقف شد.», never as the English internal status line
+  (`Operation interrupted: waiting for model response (4.8s elapsed)`) and never as an empty
+  assistant row. The send button is also a stop button while a turn runs, so `MainActivity`
+  swallows a stop tapped under 1 s after send: an impatient double-tap must not throw the
+  answer away — that is exactly what produced that line in the user's own conversation.
 - **Approvals are live, and they took three things to be live** (measured 2026-10-27, deny and
   allow both verified on `rm -rf`): `HERMES_EXEC_ASK=1` in the daemon's env (Hermes otherwise
   treats the process as non-interactive and *auto-approves*), `approvals.mode: manual`

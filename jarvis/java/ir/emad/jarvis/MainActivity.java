@@ -445,6 +445,7 @@ public class MainActivity extends Activity {
                 messages.add(streaming);
                 notifyList();
                 busy = true;
+                turnStartedAt = android.os.SystemClock.uptimeMillis();
                 sendIcon.set(Icon.STOP, Ui.ON_ACCENT);
                 setState("فکر می‌کند…", Ui.ACCENT);
                 break;
@@ -633,8 +634,18 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------------------- actions --
     /** The send button doubles as a stop button while a turn is running. */
+    /** When the running turn started; a stop tapped right after send is a double-tap, not a wish. */
+    private long turnStartedAt;
+
     private void onSendTapped() {
         if (busy) {
+            // Measured 2026-10-27: an impatient second tap on Send landed on the stop that the
+            // same button had just become, and threw away a turn that was about to answer. Under
+            // a second nobody means "stop" yet, so that tap is swallowed.
+            if (android.os.SystemClock.uptimeMillis() - turnStartedAt < 1000) {
+                toast("همین حالا شروع شد؛ برای توقف دوباره بزن");
+                return;
+            }
             Api.post("/session/" + sessionId + "/cancel", Api.body(), 15000,
                     res -> setState("متوقف شد", Ui.DIM), msg -> { });
             return;

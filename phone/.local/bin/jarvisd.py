@@ -697,12 +697,24 @@ def _run_turn_inner(session: Session, text: str) -> None:
                                         task_id="jv-%s-%d" % (session.id, turn_id))
         reply = (result or {}).get("final_response", "") or ""
         error = (result or {}).get("error")
+        # A stop lands here as an English status line ("Operation interrupted: waiting for model
+        # response (4.8s elapsed).") that reads like the model's answer. It is not one, and the
+        # user asked for it by pressing stop, so say it plainly and flag it for the app.
+        # The cancel bit is the reliable signal (measured: a mid-stream stop left `reply` empty
+        # and the text check alone would have stored a blank assistant row); the English status
+        # line is the second form the same event takes. Either way it is not an answer.
+        cancelled = session.cancel.is_set() or reply.startswith("Operation interrupted")
+        if cancelled and not reply.strip():
+            reply = "متوقف شد."
+        elif cancelled and reply.startswith("Operation interrupted"):
+            reply = "متوقف شد."
         session.messages.append({"role": "assistant", "text": reply, "ts": now(),
-                                 "ms": int((now() - started) * 1000)})
+                                 "ms": int((now() - started) * 1000),
+                                 "cancelled": cancelled})
         if error and not reply:
             session.emit("error", {"text": _short(error, 600)})
         session.emit("turn.end", {"turn": turn_id, "ms": int((now() - started) * 1000),
-                                  "reply": reply[:8000]})
+                                  "reply": reply[:8000], "cancelled": cancelled})
     except Exception as exc:  # noqa: BLE001
         import traceback
         traceback.print_exc()
@@ -1510,15 +1522,15 @@ def session_cancel(sid: str):
     if not s:
         return JSONResponse({"error": "no such session"}, status_code=404)
     s.cancel.set()
-    try:
-        from agent.async_utils import interrupt_agent  # noqa: F401
-    except Exception:  # noqa: BLE001
-        pass
     if s.agent is not None:
         try:
-            s.agent.interrupt()
-        except Exception:  # noqa: BLE001
-            pass
+            # `hard_cancel` is the difference between "stop at the next tool boundary" and
+            # "stop now". Measured 2026-10-27: a soft interrupt let a generating turn keep going
+            # for minutes after the user pressed stop, so the label changed and the tokens kept
+            # burning.
+            s.agent.interrupt("", hard_cancel=True)
+        except Exception as exc:  # noqa: BLE001
+            log("cancel failed: %s" % exc)
     return {"ok": True}
 
 
