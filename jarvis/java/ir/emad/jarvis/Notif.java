@@ -125,6 +125,21 @@ public class Notif extends NotificationListenerService {
         return live != null;
     }
 
+    /**
+     * Ask the system to bind this listener again.
+     *
+     * Toggling the listener in Settings does not always bind a service that was already
+     * registered before the toggle (measured 2026-10-27: the setting read back as enabled while
+     * `ready()` stayed false), and the only old workaround was to reboot the phone.
+     */
+    static void rebind(Context ctx) {
+        try {
+            requestRebind(new android.content.ComponentName(ctx, Notif.class));
+        } catch (Exception e) {
+            Log.w(TAG, "rebind failed: " + e);
+        }
+    }
+
     /** Last failure, or "" when nothing has gone wrong since the listener connected. */
     static String lastError() {
         return lastError;
@@ -216,10 +231,48 @@ public class Notif extends NotificationListenerService {
                     KEEP.removeLast();
                 }
             }
+            announce(pkg, app, title, text, time);
         } catch (Exception e) {
             lastError = e.getClass().getSimpleName();
             Log.w(TAG, "remember failed: " + e);
         }
+    }
+
+    /** Last announce per package, so a chatty app cannot flood the daemon. */
+    private static final Map<String, Long> ANNOUNCED = new HashMap<>();
+    private static final long ANNOUNCE_GAP_MS = 2000;
+
+    /**
+     * Tell the daemon a notification arrived, so a `notification` automation can fire.
+     *
+     * The listener is the only place that sees this at the moment it happens; without the push
+     * the daemon could only poll. Ours is skipped (an automation triggered by Jarvis's own
+     * notification would loop) and repeats are throttled per package.
+     */
+    private static void announce(String pkg, String app, String title, String text, long time) {
+        if (pkg == null || pkg.isEmpty() || (live != null && pkg.equals(live.getPackageName()))) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        synchronized (ANNOUNCED) {
+            Long last = ANNOUNCED.get(pkg);
+            if (last != null && now - last < ANNOUNCE_GAP_MS) {
+                return;
+            }
+            ANNOUNCED.put(pkg, now);
+        }
+        org.json.JSONObject body = new org.json.JSONObject();
+        try {
+            body.put("kind", "notification");
+            body.put("package", pkg);
+            body.put("app", app == null ? "" : app);
+            body.put("title", title == null ? "" : title);
+            body.put("text", text == null ? "" : text);
+            body.put("ts", time > 0 ? time / 1000.0 : now / 1000.0);
+        } catch (org.json.JSONException ignored) {
+            return;
+        }
+        Api.post("/automation/event", body, 4000, res -> { }, err -> { });
     }
 
     /** Best-effort app label; falls back to the package name. */

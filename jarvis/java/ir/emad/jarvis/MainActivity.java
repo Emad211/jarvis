@@ -89,6 +89,11 @@ public class MainActivity extends Activity {
         // It answers /ping even when the accessibility service is still off, so the daemon can
         // tell "app not running" apart from "permission not granted".
         Bridge.start(this);
+        // Reinstalling the APK leaves the notification-listener toggle on while the service is
+        // unbound; one rebind on launch saves the user a trip to Settings (and a reboot).
+        if (!Notif.ready()) {
+            Notif.rebind(this);
+        }
         connect(true);
     }
 

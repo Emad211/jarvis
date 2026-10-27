@@ -63,9 +63,37 @@ public class A11y extends AccessibilityService {
         super.onDestroy();
     }
 
+    /** The last package we told the daemon about, and when, to keep this to one push per switch. */
+    private static String lastPkg = "";
+    private static long lastPkgAt = 0;
+
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        // no reactive behaviour: everything is pull-based from Bridge
+        // Only one reactive thing: a change of foreground app. Everything else stays pull-based,
+        // because a listener that reacts to every event burns battery for nothing.
+        if (event == null || event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            return;
+        }
+        CharSequence name = event.getPackageName();
+        String pkg = name == null ? "" : name.toString();
+        if (pkg.isEmpty() || pkg.equals(lastPkg) || pkg.equals(getPackageName())) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastPkgAt < 800) {
+            return;
+        }
+        lastPkg = pkg;
+        lastPkgAt = now;
+        org.json.JSONObject body = new org.json.JSONObject();
+        try {
+            body.put("kind", "app_open");
+            body.put("package", pkg);
+            body.put("ts", now / 1000.0);
+        } catch (org.json.JSONException ignored) {
+            return;
+        }
+        Api.post("/automation/event", body, 4000, res -> { }, err -> { });
     }
 
     @Override

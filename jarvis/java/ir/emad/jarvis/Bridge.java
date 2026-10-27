@@ -174,6 +174,9 @@ final class Bridge {
                     out.put("error", d.optString("error", ""));
                     out.put("needs", d.optString("needs", ""));
                     out.put("count", d.optInt("count", 0));
+                    // `detail` carries the real Java message (e.g. why a calendar query was
+                    // rejected). Dropping it turns a fixable bug into "it just fails".
+                    out.put("detail", d.optString("detail", ""));
                     out.put("items", d.optJSONArray("items") == null
                             ? new org.json.JSONArray() : d.optJSONArray("items"));
                     return out;

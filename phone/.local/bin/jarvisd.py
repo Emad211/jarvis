@@ -84,7 +84,19 @@ JARVIS_BRIEF = (
     "Be direct and fast: answer in the user's language (Persian by default), keep replies "
     "short, and prefer doing the task with a tool over describing how to do it. "
     "When you use a tool, say in one line what you are doing. Never invent results: if a "
-    "tool failed, say what failed. Never print API keys or passwords."
+    "tool failed, say what failed. Never print API keys or passwords. "
+    # Measured 2026-10-27: asked about notifications, the model reached for
+    # termux-notification-list (needs Termux:API) instead of the app's own reader. The brief is
+    # the only instruction that is always in the prompt, so the right door is named here.
+    "For anything about this phone itself — notifications, calendar, contacts, SMS, installed "
+    "apps, screen, clipboard — use the jarvis-fast CLI, not termux-api binaries: "
+    "`jarvis-fast notif_list '{}'`, `jarvis-fast notif_clear '{}'`, "
+    "`jarvis-fast calendar_today '{}'`, `jarvis-fast calendar_range '{\"days\":7}'`, "
+    "`jarvis-fast sms_recent '{\"limit\":10}'`, "
+    "`jarvis-fast contacts_search '{\"query\":\"علی\"}'`, `jarvis-fast apps_list '{}'`, "
+    "`jarvis-fast ui '{}'`, `jarvis-fast clipboard '{}'`. "
+    "If one answers ok:false with needs:<permission>, tell the user to grant it in the app under "
+    "کنترل گوشی → دسترسی‌ها; do not try to bypass it."
 )
 
 # Toolset presets. The old default was a 7-tool subset that silently excluded web search,

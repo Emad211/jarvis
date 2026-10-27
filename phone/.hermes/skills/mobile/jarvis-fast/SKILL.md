@@ -36,8 +36,23 @@ Output is one JSON line: `{"ok": true, "intent": "...", "ms": 137, "detail": "..
 | `info` | `{"what":"time"｜"storage"｜"uptime"}` | clock/disk/uptime |
 | `open_url` | `{"url":"https://…"}` | opens a link |
 | `dial` | `{"number":"+98…"}` | opens the dialer with the number |
-| `notifications` | `{}` | opens the notification shade |
+| `notifications` | `{}` | opens the notification shade (the *act*; reading them is below) |
+| `notif_list` | `{}` | the phone's current notifications: app, title, text |
+| `notif_clear` | `{}` | dismisses all notifications |
+| `calendar_today` | `{}` | today's events (title, time, location) |
+| `calendar_range` | `{"days":7}` | events from today up to N days ahead |
+| `contacts_search` | `{"query":"علی"}` | contacts by name/number fragment |
+| `sms_recent` | `{"limit":10}` | the last N inbox messages |
+| `apps_list` | `{}` | launchable apps, matched by name or package |
 | `list` | — | prints every supported intent |
+
+## Reading the phone's own data
+
+`notif_list`, `calendar_today`, `calendar_range`, `contacts_search`, `sms_recent` and
+`apps_list` answer from the app itself: fast (~60–180 ms) and no accessibility service needed.
+A refusal looks like `ok:false` with `needs: android.permission.READ_CALENDAR` or
+`notification_listener` — that is the **user's** toggle, one time: منو → کنترل گوشی →
+دسترسی‌ها. Do not try to route around it with adb, and never claim data you did not receive.
 
 ## How to drive the phone well
 

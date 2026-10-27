@@ -63,6 +63,24 @@ One repo for both halves of the system. Background history: `../hermes-handoff/H
   167 ms for the whole `jarvis-fast clipboard` call, and «کلیپ‌بورد رو بخون» answers from the fast
   lane. `clipboard_get` (accessibility) and `termux-clipboard-get` are *structurally* empty from
   the background — do not try to fix those two again.
+- The phone's own data is readable by the agent through the same CLI (measured 2026-10-27, all
+  from the app's bridge, no adb, no a11y): `notif_list` 67 ms, `calendar_today` 86 ms,
+  `calendar_range` 79 ms with a real event, `sms_recent` 179 ms for 20 messages,
+  `contacts_search` ~100 ms for 10 matches, `apps_list` 77 ms for 40 apps. Each answer carries
+  `text` (readable lines) plus `items`; a refusal is `ok:false` with `needs:<permission>` and the
+  Persian sentence telling the user where to grant it. The calendar query **must** use
+  `Instances.CONTENT_URI` + `ContentUris.appendId` — the `?begin=&end=` form is rejected on this
+  phone with `Invalid URI parameter: begin`. The listener is enabled by
+  `cmd notification allow_listener ir.emad.jarvis/ir.emad.jarvis.Notif`; a Settings write alone
+  leaves it unbound, so `MainActivity` asks for a rebind on launch.
+- **Automation triggers are pushed, not polled.** `Notif` posts `{"kind":"notification",…}` and
+  `A11y` posts `{"kind":"app_open",…}` to `POST /automation/event` (own package skipped, 2 s
+  debounce per package), and `jarvisd_automation` matches them (`package` exact/`*`, `match` as a
+  case-insensitive substring of title+text) and fires through `_fire`. Measured: a real shell
+  notification → a `notification` automation ran an `info` intent in 17 ms; a matching event
+  costs 7–10 ms, a non-match 7 ms. The `app_open` poller still works as the fallback and shares
+  the debounce so a push never double-fires. Ring buffer of 200 events on
+  `GET /automation/events` (memory only, resets on restart).
 - **Approvals are live, and they took three things to be live** (measured 2026-10-27, deny and
   allow both verified on `rm -rf`): `HERMES_EXEC_ASK=1` in the daemon's env (Hermes otherwise
   treats the process as non-interactive and *auto-approves*), `approvals.mode: manual`

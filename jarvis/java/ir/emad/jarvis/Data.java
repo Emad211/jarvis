@@ -2,6 +2,7 @@ package ir.emad.jarvis;
 
 import android.Manifest;
 import android.content.ContentResolver;
+import android.content.ContentUris;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -188,10 +189,12 @@ final class Data {
         long from = start.getTimeInMillis();
         long to = from + (long) n * 24L * 60L * 60L * 1000L;
 
-        Uri.Builder b = CalendarContract.CONTENT_URI.buildUpon()
-                .appendPath("instances")
-                .appendQueryParameter(CalendarContract.Instances.BEGIN, Long.toString(from))
-                .appendQueryParameter(CalendarContract.Instances.END, Long.toString(to));
+        // `instances/when/<from>/<to>` is the documented shape and the only one this phone's
+        // provider accepts: the query-parameter form answered
+        // `IllegalArgumentException: Invalid URI parameter: begin` (measured 2026-10-27).
+        Uri.Builder b = CalendarContract.Instances.CONTENT_URI.buildUpon();
+        ContentUris.appendId(b, from);
+        ContentUris.appendId(b, to);
         String[] proj = {
                 CalendarContract.Instances.BEGIN,
                 CalendarContract.Instances.END,

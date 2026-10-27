@@ -43,9 +43,13 @@ BRIDGE = "http://127.0.0.1:8791"
 _BRIDGE_STATE = [0.0, False]   # [checked_at, ready]
 # intents the bridge can do; `screenshot` is excluded because its file lives in the app's
 # private cache, which Termux cannot read — that one keeps using adb.
+# Seven reads the app answers for itself: notifications, calendar, contacts, SMS, apps. They
+# need no accessibility service (the app holds the grant), so they never touch adb.
+DATA_INTENTS = ("notif_list", "notif_clear", "calendar_today", "calendar_range",
+                "contacts_search", "sms_recent", "apps_list")
 BRIDGE_INTENTS = {"open_app", "open_url", "dial", "tap", "swipe", "key", "type",
                   "clipboard", "volume", "info", "ui", "screenshot",
-                  "battery"}
+                  "battery"} | set(DATA_INTENTS)
 # `notifications` is deliberately NOT here: Bridge.java has no such action (measured —
 # `{"intent":"notifications"}` answers `{"ok":false,"error":"unknown_intent"}`), so it only
 # added a wasted probe before falling through to adb. If the app ever grows that action,
@@ -516,6 +520,100 @@ def clipboard_set(text: str) -> Tuple[int, str]:
         return 1, str(exc)
 
 
+# ---------------------------------------------------------------- device data --
+# Seven reads the app answers for itself (notifications, calendar, contacts, SMS, apps). They
+# need no accessibility service — the app holds the grant — so they go through the bridge and
+# never touch adb. A refusal is reported in the app's own words: the permission has to be
+# granted to the *app*, which is a thing the user can do, so "permission" alone is useless.
+
+def _act(intent, args):
+    """One raw call to the app's bridge. None when the app did not answer at all."""
+    try:
+        req = urllib.request.Request(BRIDGE + "/act",
+                                     data=json.dumps({"intent": intent,
+                                                      "args": dict(args or {})}).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read().decode("utf-8", "ignore"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _why_not(res):
+    """Turn the bridge's refusal into something the user can act on."""
+    res = res or {}
+    err = str(res.get("error") or "")
+    needs = str(res.get("needs") or "")
+    if err == "permission":
+        return "اجازه‌اش را به اپ جارویس بده: " + needs
+    if err in ("listener_off", "no_listener", "not_ready"):
+        return "دسترسی خواندن اعلان‌ها در تنظیمات گوشی برای جارویس روشن نیست"
+    if err:
+        detail = str(res.get("detail") or "").strip()
+        return "اپ جواب داد: " + err + ((" — " + detail[:180]) if detail else "")
+    return "اپ جارویس جواب نداد (باز است؟)"
+
+
+def _fmt_items(intent, items):
+    """One readable line per row, for the model and for the card."""
+    lines = []
+    for it in (items or [])[:30]:
+        if not isinstance(it, dict):
+            continue
+        if intent in ("notif_list", "notif_clear"):
+            lines.append("%s: %s — %s" % (it.get("app") or it.get("package") or "",
+                                          it.get("title") or "", it.get("text") or ""))
+        elif intent in ("calendar_today", "calendar_range"):
+            when = it.get("begin_iso") or ""
+            if it.get("all_day"):
+                when = "تمام روز"
+            elif len(when) >= 16:
+                when = when[11:16]
+            lines.append("%s %s%s" % (when, it.get("title") or "",
+                                      (" · " + it["location"]) if it.get("location") else ""))
+        elif intent == "contacts_search":
+            lines.append(it.get("name") or it.get("label") or "")
+        elif intent == "sms_recent":
+            # Data.java names these from/text (not address/body) — measured, not guessed.
+            when = str(it.get("date_iso") or "")[11:16]
+            lines.append("%s%s: %s" % ((when + " ") if when else "",
+                                       it.get("from") or "",
+                                       (it.get("text") or "")[:120]))
+        else:
+            lines.append(str(it.get("label") or it.get("name") or it.get("package") or it))
+    return "\n".join(line.strip() for line in lines if line.strip())
+
+
+def device_data(args: Dict[str, Any], intent: str = "") -> Dict[str, Any]:
+    """Read one of the app's own data sources. Never claims a result it did not get."""
+    started = time.time()
+    intent = intent or str(args.get("intent") or "")
+    if intent not in DATA_INTENTS:
+        return _err(intent, started, "این داده شناخته نشد")
+    call = {k: v for k, v in args.items() if k != "intent"}
+    res = _act(intent, call)
+    if res is None:
+        return _err(intent, started, _why_not(None), source="bridge")
+    if not res.get("ok"):
+        return _err(intent, started, _why_not(res), source="bridge",
+                    needs=res.get("needs", ""), error=res.get("error", ""))
+    items = res.get("items") or []
+    text = _fmt_items(intent, items)
+    count = int(res.get("count") or len(items))
+    detail = text if text else "چیزی نبود"
+    if intent == "notif_clear":
+        detail = "پاک شد"
+    return _ok(intent, started, detail, text=text, items=items[:30], count=count,
+               source="bridge")
+
+
+def _data_wrapper(intent):
+    """`INTENTS` entries take only `args`, so bind the intent name here."""
+    def run(args: Dict[str, Any]) -> Dict[str, Any]:
+        return device_data(args, intent)
+    run.__name__ = intent
+    return run
+
 def clipboard(args: Dict[str, Any]) -> Dict[str, Any]:
     """Set, or read, the clipboard — and never answer a silent empty string.
 
@@ -714,6 +812,9 @@ INTENTS = {
     "notifications": notifications,
     "ui": ui_dump,
 }
+# The device's own data sources. One wrapper per name because INTENTS takes `args` only.
+for _name in DATA_INTENTS:
+    INTENTS[_name] = _data_wrapper(_name)
 
 # Intents the app may show as one-tap chips, with their Persian labels.
 CHIPS = [
@@ -746,8 +847,12 @@ _ROUTE_SIMPLE = [
     (re.compile(r"^(?:برگرد|بازگشت|back)$", re.I), "key", {"name": "back"}, "برگشت"),
     (re.compile(r"^(?:برنامه‌های\s+)?اخیر$|^recents$", re.I),
      "key", {"name": "recents"}, "برنامه‌های اخیر"),
-    (re.compile(r"^(?:نوار\s+)?اعلان‌?ها?$|^notifications?$", re.I),
-     "notifications", {}, "اعلان‌ها"),
+    # Plain «اعلان‌ها» now *reads* them (`notif_list`, further down); opening the shade is a
+    # different act, so it keeps a phrase nobody says by accident.
+    (re.compile(r"^(?:نوار|پنل)[\s\u200c]+اعلان[\s\u200c]*(?:ها|ها)?$"
+                r"|^اعلان[\s\u200c]*(?:ها)?[\s\u200c]+(?:رو|را)[\s\u200c]+(?:باز|بکش)[\s\u200c]*کن$"
+                r"|^open[\s\u200c]+notifications$", re.I),
+     "notifications", {}, "باز کردن نوار اعلان‌ها"),
     (re.compile(r"^(?:صدا|صدای?)\s*(?:رو)?\s*(?:بیشتر|بالا|زیاد)$|^volume\s*up$", re.I),
      "volume", {"action": "up"}, "صدای بیشتر"),
     (re.compile(r"^(?:صدا|صدای?)\s*(?:رو)?\s*(?:کمتر|پایین)$|^volume\s*down$", re.I),
@@ -759,6 +864,25 @@ _ROUTE_SIMPLE = [
      "ui", {}, "چه روی صفحه است"),
     (re.compile(r"^(?:فضای|حافظه)\s*(?:ذخیره|خالی)?$|^storage$", re.I),
      "info", {"what": "storage"}, "فضای ذخیره"),
+    (re.compile(r"^(?:چه\s+)?(?:اعلان|نوتیفیکیشن)[\s\u200c]*(?:ها|های|هاي)?[\s\u200c]*"
+                r"(?:رو|را|و)?[\s\u200c]*(?:بخون|بخوان|ببین|نشون[\s\u200c]*بده|چیه|چیست|چی[\s\u200c]*هست)?$"
+                r"|^(?:notifications|notifs)$", re.I),
+     "notif_list", {}, "اعلان‌ها"),
+    (re.compile(r"^(?:اعلان|نوتیفیکیشن)[\s\u200c]*(?:ها|های)?[\s\u200c]*(?:رو|را)?[\s\u200c]*"
+                r"(?:پاک|پاکیزه)[\s\u200c]*کن$|^clear[\s\u200c]+notifications$", re.I),
+     "notif_clear", {}, "پاک کردن اعلان‌ها"),
+    (re.compile(r"^(?:قرار|قرارها|رویداد|برنامه)[\s\u200c]*(?:های)?[\s\u200c]*"
+                r"(?:امروز|امروزم)[\s\u200c]*(?:چیه|چیست|چیا|رو|را)?[\s\u200c]*(?:بگو|بخون|ببین)?$"
+                r"|^امروز[\s\u200c]+چه[\s\u200c]+قراری[\s\u200c]+دارم$|^calendar(?:[\s\u200c]+today)?$", re.I),
+     "calendar_today", {}, "قرارهای امروز"),
+    (re.compile(r"^(?:قرار|قرارها|رویداد)[\s\u200c]*(?:های)?[\s\u200c]*"
+                r"(?:این[\s\u200c]+هفته|هفته|هفت[\s\u200c]+روز[\s\u200c]+آینده)$", re.I),
+     "calendar_range", {"days": 7}, "قرارهای این هفته"),
+
+    (re.compile(r"^(?:پیامک|اس‌ام‌اس|sms)[\s\u200c]*(?:ها|های)?[\s\u200c]*"
+                r"(?:آخر|اخیر|جدید|آخرین)?[\s\u200c]*(?:رو|را)?[\s\u200c]*(?:بخون|ببین|نشون[\s\u200c]*بده)?$"
+                r"|^آخرین[\s\u200c]+پیامک[\s\u200c]*(?:ها)?$", re.I),
+     "sms_recent", {"limit": 10}, "پیامک‌های آخر"),
     (re.compile(r"^(?:متن[\s\u200c]+)?(?:کلیپ[\s\u200c]*بورد|clipboard)[\s\u200c]*"
                 r"(?:رو|را|و)?[\s\u200c]*"
                 r"(?:بخون|بخونش|بخوان|نشون[\s\u200c]*بده|ببین|چیه|چیست)?$", re.I),
@@ -772,6 +896,9 @@ _CLIP_SET_BEFORE = re.compile(
     r"^(?:متن\s+)?(?:این\s+)?(?P<a>.+?)[\s\u200c]+(?:رو|را)[\s\u200c]+(?:تو|در|به)[\s\u200c]+"
     r"(?:کلیپ[\s\u200c]*بورد|clipboard)[\s\u200c]+(?:بذار|بگذار|کپی[\s\u200c]*کن)$"
     r"|^copy[\s\u200c]+(?P<b>.+)$", re.I)
+# A contact search carries the name with it, so like the clipboard write it needs a group.
+_CONTACT = re.compile(r"^(?:شماره|مخاطب|تلفن)[\s\u200c]+(?:ی|ِ|يه|یه)?[\s\u200c]*"
+                      r"(?P<query>[^\s].{0,40})$|^contact[\s\u200c]+(?P<query2>.+)$", re.I)
 _CLIP_SET_AFTER = re.compile(
     r"^(?:.*?)(?:کلیپ[\s\u200c]*بورد|clipboard)[\s\u200c]*(?:رو|را)?[\s\u200c]*"
     r"(?:تو|در|به)?[\s\u200c]*(?:بذار|بگذار|کپی[\s\u200c]*کن)[\s\u200c]*[:：]?[\s\u200c]*"
@@ -791,6 +918,13 @@ def route(text: str) -> Optional[Dict[str, Any]]:
     if m:
         return {"intent": "brightness", "args": {"percent": int(m.group(1))},
                 "label": "روشنایی " + m.group(1) + "٪"}
+    m = _CONTACT.match(t)
+    if m:
+        # Two alternatives so Persian and Latin phrasing share one pattern; only one is set.
+        query = (m.group("query") or m.group("query2") or "").strip(" .!،؟?")
+        if query:
+            return {"intent": "contacts_search", "args": {"query": query},
+                    "label": "جست‌وجوی مخاطب"}
     for pattern, groups in ((_CLIP_SET_BEFORE, ("a", "b")), (_CLIP_SET_AFTER, ("c",))):
         m = pattern.match(t)
         if m:
@@ -823,7 +957,9 @@ def run(intent: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     before = _readback(kind) if want_verify else ""
     # The app's own hands first: it needs no adb pairing and no Shizuku, which is the whole
     # difference between "install three apps and pair wireless debugging" and "flip one toggle".
-    if intent in BRIDGE_INTENTS:
+    # Data intents call the bridge themselves (their answer has a payload the generic
+    # shortcut would drop), so they must not go through it.
+    if intent in BRIDGE_INTENTS and intent not in DATA_INTENTS:
         via = bridge(intent, args)
         if via is not None:
             via.setdefault("ms", int((time.time() - started) * 1000))

@@ -966,6 +966,8 @@ final class Panels {
                         toast(a, "تنظیمات باز نشد");
                     }
                 }), Ui.fill());
+        box.addView(Sheet.item(a, "دسترسی‌ها", "اعلان، تقویم، مخاطبین، پیامک، دسترسی‌پذیری",
+                null, () -> access(a)), Ui.fill());
         box.addView(Sheet.divider(a), Ui.fill());
         box.addView(Sheet.item(a, "امتحان کن", "یک‌بار صفحه را می‌خواند", null, () -> {
             Api.post("/fast", Api.body("intent", "info", "args", new JSONObject()), 15000,
@@ -977,6 +979,70 @@ final class Panels {
         Sheet.show(a, "کنترل گوشی", box);
     }
 
+    // ------------------------------------------------------------------- access --
+    /**
+     * One place that says what Jarvis may actually reach, and grants it.
+     *
+     * Every row is a different Android mechanism — a runtime permission, the notification
+     * listener, the accessibility service — and each has its own settings screen. Putting them
+     * together is the difference between "it silently returns nothing" and a person knowing
+     * which toggle is off. Measured 2026-10-27: calendar/SMS/notifications were all refusing,
+     * and the only hint was an empty `ok:false` in a tool card.
+     */
+    static void access(Activity a) {
+        // The system sometimes leaves a just-enabled listener unbound; one rebind request fixes
+        // it without asking the user to reboot.
+        if (!Notif.ready()) {
+            Notif.rebind(a);
+        }
+        boolean notif = Notif.ready();
+        boolean a11y = A11y.ready();
+        boolean cal = granted(a, "android.permission.READ_CALENDAR");
+        boolean contacts = granted(a, "android.permission.READ_CONTACTS");
+        boolean sms = granted(a, "android.permission.READ_SMS");
+        LinearLayout box = Ui.col(a);
+        box.addView(Sheet.section(a, "چیزهایی که جارویس می‌تواند بخواند"), Ui.fill());
+        box.addView(row(a, "اعلان‌ها", "خواندن و پاک کردن اعلان‌های گوشی", notif,
+                () -> openSettings(a, android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)),
+                Ui.fill());
+        box.addView(row(a, "تقویم", "قرارهای امروز و هفته", cal,
+                () -> ask(a, new String[]{"android.permission.READ_CALENDAR"}, 11)), Ui.fill());
+        box.addView(row(a, "مخاطبین", "پیدا کردن شماره با نام", contacts,
+                () -> ask(a, new String[]{"android.permission.READ_CONTACTS"}, 12)), Ui.fill());
+        box.addView(row(a, "پیامک‌ها", "پیام‌های آخر", sms,
+                () -> ask(a, new String[]{"android.permission.READ_SMS"}, 13)), Ui.fill());
+        box.addView(row(a, "دسترسی‌پذیری", "لمس، تایپ، خواندن صفحه، خودکار کردن", a11y,
+                () -> openSettings(a, android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)), Ui.fill());
+        box.addView(Sheet.divider(a), Ui.fill());
+        box.addView(Ui.text(a, "هر کدام را که روشن کنی، همان لحظه از مسیر سریع جواب می‌گیرد — "
+                + "بدون ریستارت اپ.", 12f, Ui.FAINT, false), Ui.fill());
+        Sheet.show(a, "دسترسی‌ها", box);
+    }
+
+    private static boolean granted(Activity a, String perm) {
+        return a.checkSelfPermission(perm) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+    }
+
+    private static void ask(Activity a, String[] perms, int code) {
+        try {
+            a.requestPermissions(perms, code);
+        } catch (Exception e) {
+            toast(a, "اجازه گرفته نشد");
+        }
+    }
+
+    private static void openSettings(Activity a, String action) {
+        try {
+            a.startActivity(new android.content.Intent(action));
+        } catch (Exception e) {
+            toast(a, "تنظیمات باز نشد");
+        }
+    }
+
+    private static View row(Activity a, String title, String sub, boolean on, Runnable tap) {
+        return Sheet.item(a, title, on ? "روشن · " + sub : "خاموش · " + sub,
+                on ? Ui.GREEN : Ui.AMBER, tap);
+    }
     // --------------------------------------------------------------------- helpers --
     /** Our own loading panel: a dark rounded card with one line, not the system spinner box. */
     private static AlertDialog busy(Activity a, String text) {
