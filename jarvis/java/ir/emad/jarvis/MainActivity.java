@@ -709,6 +709,7 @@ public class MainActivity extends Activity {
                 "پروژه و کد",
                 "حالت ابزار این گفتگو",
                 "زمان‌بندی",
+                "اتوماسیون‌ها",
                 "سرویس‌ها و لاگ‌ها",
                 "پرووایدرها و کلیدها",
                 "تنظیمات",
@@ -753,26 +754,29 @@ public class MainActivity extends Activity {
                             Panels.cron(this);
                             break;
                         case 10:
-                            Panels.services(this);
+                            Panels.automations(this);
                             break;
                         case 11:
-                            providersDialog();
+                            Panels.services(this);
                             break;
                         case 12:
-                            settings();
+                            providersDialog();
                             break;
                         case 13:
-                            setupWizard();
+                            settings();
                             break;
                         case 14:
-                            Panels.voice(this);
+                            setupWizard();
                             break;
                         case 15:
+                            Panels.voice(this);
+                            break;
+                        case 16:
                             ttsOn = !ttsOn;
                             prefs.edit().putBoolean("tts", ttsOn).apply();
                             toast(ttsOn ? "صدا روشن شد" : "صدا خاموش شد");
                             break;
-                        case 16:
+                        case 17:
                             Panels.hands(this);
                             break;
                         default:

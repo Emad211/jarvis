@@ -71,6 +71,10 @@ final class Api {
         call("DELETE", path, null, timeoutMs, ok, fail);
     }
 
+    static void patch(String path, JSONObject payload, int timeoutMs, Ok ok, Fail fail) {
+        call("PATCH", path, payload == null ? new JSONObject() : payload, timeoutMs, ok, fail);
+    }
+
     /**
      * GET an endpoint whose body is a top-level JSON array (`/personas`, `/skills`, `/cron`,
      * `/services`, `/mcp`, …). `JSONObject` cannot parse those, so they need their own path.

@@ -979,6 +979,428 @@ final class Panels {
         Sheet.show(a, "کنترل گوشی", box);
     }
 
+    // ---------------------------------------------------------------- automations --
+    /**
+     * "When X happens, do Y" — the panel the daemon never had.
+     *
+     * Triggers come from the app's own pushes: a notification (from any app, optionally
+     * matching a word) or an app being opened. A time trigger becomes a Hermes cron job and a
+     * manual one only ever runs when you press it. Actions are one fast device intent, a line
+     * for the agent, or a notification back to you.
+     */
+    static void automations(Activity a) {
+        AlertDialog spin = busy(a, "اتوماسیون‌ها…");
+        Api.getArray("/automations", 30000, rows -> {
+            spin.dismiss();
+            LinearLayout box = Ui.col(a);
+            int on = 0;
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject r = rows.optJSONObject(i);
+                if (r != null && r.optBoolean("enabled", true)) {
+                    on++;
+                }
+            }
+            box.addView(Sheet.section(a, rows.length() == 0
+                    ? "هنوز اتوماسیونی نیست"
+                    : rows.length() + " اتوماسیون · " + on + " روشن"), Ui.fill());
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject r = rows.optJSONObject(i);
+                if (r == null) {
+                    continue;
+                }
+                final String id = r.optString("id", "");
+                final String name = r.optString("name", id);
+                final boolean enabled = r.optBoolean("enabled", true);
+                String sub = triggerText(r.optJSONObject("trigger")) + "  ←  "
+                        + actionText(r.optJSONObject("action"));
+                if (r.optBoolean("pending", false)) {
+                    sub += " · غیرفعال عملی";
+                } else if (r.optInt("runs", 0) > 0) {
+                    sub += " · " + r.optInt("runs", 0) + " بار اجرا";
+                }
+                box.addView(Sheet.item(a, name, sub, enabled ? Ui.GREEN : Ui.FAINT,
+                        () -> automationActions(a, id, name, enabled)), Ui.fill());
+                box.addView(Sheet.divider(a), Ui.fill());
+            }
+            box.addView(Sheet.item(a, "اتوماسیون تازه", "یک تریگر و یک کار", Ui.ACCENT,
+                    () -> autoDraft(a, new Auto())), Ui.fill());
+            box.addView(Sheet.item(a, "رویدادهای تازه", "چیزهایی که گوشی خبر داده", null,
+                    () -> autoEvents(a)), Ui.fill());
+            Sheet.show(a, "اتوماسیون‌ها", box);
+        }, msg -> {
+            spin.dismiss();
+            toast(a, "فهرست نیامد: " + msg);
+        });
+    }
+
+    private static String triggerText(JSONObject trig) {
+        if (trig == null) {
+            return "?";
+        }
+        String kind = trig.optString("kind", "");
+        String pkg = trig.optString("package", "");
+        if ("notification".equals(kind)) {
+            String p = pkg.isEmpty() || "*".equals(pkg) ? "هر اپ" : pkg;
+            String m = trig.optString("match", "");
+            return "اعلان از " + p + (m.isEmpty() ? "" : " با «" + m + "»");
+        }
+        if ("app_open".equals(kind)) {
+            return "باز شدن " + (pkg.isEmpty() || "*".equals(pkg) ? "هر اپ" : pkg);
+        }
+        if ("time".equals(kind)) {
+            return "زمان‌بندی " + ltr(trig.optString("cron", ""));
+        }
+        return "دستی";
+    }
+
+    private static String actionText(JSONObject act) {
+        if (act == null) {
+            return "?";
+        }
+        String kind = act.optString("kind", "");
+        String intent = act.optString("intent", "");
+        if (!intent.isEmpty()) {
+            return "دستور " + intent;
+        }
+        if ("agent_prompt".equals(kind)) {
+            return "به عامل: " + clampText(act.optString("prompt", ""), 40);
+        }
+        if ("notify".equals(kind)) {
+            return "اعلان: " + clampText(act.optString("text", ""), 40);
+        }
+        return kind;
+    }
+
+    private static String clampText(String s, int max) {
+        String v = s == null ? "" : s.replace("\n", " ");
+        return v.length() <= max ? v : v.substring(0, max) + "…";
+    }
+
+    private static void automationActions(Activity a, String id, String name, boolean enabled) {
+        LinearLayout box = Ui.col(a);
+        box.addView(Sheet.item(a, "همین حالا اجرا کن", "بدون صبر برای تریگر", Ui.ACCENT,
+                () -> autoRun(a, id)), Ui.fill());
+        box.addView(Sheet.item(a, enabled ? "خاموشش کن" : "روشنش کن", null,
+                enabled ? Ui.FAINT : Ui.GREEN, () -> autoToggle(a, id, !enabled)), Ui.fill());
+        box.addView(Sheet.item(a, "تاریخچه", "اجراهای قبلی و نتیجه‌شان", null,
+                () -> autoLog(a, id, name)), Ui.fill());
+        box.addView(Sheet.divider(a), Ui.fill());
+        box.addView(Sheet.item(a, "حذف", name, Ui.RED, () ->
+                Sheet.confirm(a, "حذف اتوماسیون",
+                        "«" + name + "» پاک می‌شود. اگر زمان‌بندی داشته باشد، کار کرونش هم حذف می‌شود.",
+                        "حذف کن", Ui.RED, () ->
+                                Api.delete("/automations/" + id, 30000, res -> {
+                                    toast(a, "پاک شد");
+                                    automations(a);
+                                }, msg -> toast(a, "پاک نشد: " + msg)))), Ui.fill());
+        Sheet.show(a, name, box);
+    }
+
+    private static void autoRun(Activity a, String id) {
+        AlertDialog spin = busy(a, "در حال اجرا…");
+        Api.post("/automations/" + id + "/run", Api.body(), 120000, res -> {
+            spin.dismiss();
+            boolean ok = res.optBoolean("ok", false);
+            String detail = res.optString("detail", "");
+            if (detail.isEmpty() && res.optJSONObject("result") != null) {
+                detail = res.optJSONObject("result").optString("detail", "");
+            }
+            toast(a, (ok ? "اجرا شد" : "اجرا نشد") + (detail.isEmpty() ? "" : ": " + detail));
+            automations(a);
+        }, msg -> {
+            spin.dismiss();
+            toast(a, "اجرا نشد: " + msg);
+        });
+    }
+
+    private static void autoToggle(Activity a, String id, boolean enable) {
+        Api.patch("/automations/" + id, Api.body("enabled", enable), 30000, res -> {
+            toast(a, enable ? "روشن شد" : "خاموش شد");
+            automations(a);
+        }, msg -> toast(a, "نشد: " + msg));
+    }
+
+    private static void autoLog(Activity a, String id, String name) {
+        Api.get("/automations/" + id + "/log", 20000, res -> {
+            LinearLayout box = Ui.col(a);
+            box.setPadding(Ui.dp(a, 18), Ui.dp(a, 4), Ui.dp(a, 18), Ui.dp(a, 12));
+            JSONArray log = res.optJSONArray("log");
+            if (log == null || log.length() == 0) {
+                box.addView(Sheet.item(a, "هنوز اجرا نشده", null, null, null), Ui.fill());
+            }
+            for (int i = 0; log != null && i < log.length() && i < 20; i++) {
+                JSONObject r = log.optJSONObject(log.length() - 1 - i);
+                if (r == null) {
+                    continue;
+                }
+                String when = r.optString("at", "");
+                String head = when.length() > 16 ? when.substring(11, 16) : when;
+                String sub = (r.optBoolean("ok", false) ? "موفق" : "ناموفق")
+                        + " · " + r.optInt("ms", 0) + "ms · " + r.optString("trigger", "");
+                String res2 = r.optString("result", "");
+                box.addView(Sheet.item(a, head, sub + (res2.isEmpty() ? "" : " · " + clampText(res2, 60)),
+                        r.optBoolean("ok", false) ? Ui.GREEN : Ui.RED, null), Ui.fill());
+            }
+            Sheet.show(a, "تاریخچهٔ " + name, box);
+        }, msg -> toast(a, "تاریخچه نیامد: " + msg));
+    }
+
+    private static void autoEvents(Activity a) {
+        Api.get("/automation/events?limit=12", 15000, res -> {
+            LinearLayout box = Ui.col(a);
+            JSONArray rows = res.optJSONArray("events");
+            if (rows == null || rows.length() == 0) {
+                box.addView(Sheet.item(a, "چیزی نرسیده", "اعلان یا باز شدن اپی ثبت نشده", null,
+                        null), Ui.fill());
+            }
+            for (int i = 0; rows != null && i < rows.length(); i++) {
+                JSONObject r = rows.optJSONObject(i);
+                if (r == null) {
+                    continue;
+                }
+                int matched = r.optInt("matched", 0);
+                String sub = matched > 0 ? matched + " اتوماسیون اجرا شد" : "به هیچ‌کدام نخورد";
+                String title = "app_open".equals(r.optString("kind", ""))
+                        ? "باز شد: " + (r.optString("app", "").isEmpty()
+                            ? r.optString("package", "") : r.optString("app", ""))
+                        : clampText((r.optString("app", "") + ": " + r.optString("title", "")
+                            + " — " + r.optString("text", "")), 60);
+                box.addView(Sheet.item(a, title, sub,
+                        matched > 0 ? Ui.GREEN : Ui.FAINT, null), Ui.fill());
+            }
+            Sheet.show(a, "رویدادهای تازه", box);
+        }, msg -> toast(a, "رویدادها نیامد: " + msg));
+    }
+
+    /** A draft automation, filled in across three small sheets. */
+    private static final class Auto {
+        String name = "";
+        String triggerKind = "notification";
+        String pkg = "*";
+        String match = "";
+        String cron = "0 8 * * *";
+        String actionKind = "intent";
+        String intent = "info";
+        String args = "{}";
+        String text = "";
+    }
+
+    private static void autoDraft(Activity a, Auto d) {
+        LinearLayout box = Ui.col(a);
+        box.setPadding(Ui.dp(a, 18), Ui.dp(a, 4), Ui.dp(a, 18), Ui.dp(a, 12));
+        final EditText name = Ui.input(a, "نام (اختیاری)");
+        name.setText(d.name);
+        box.addView(Sheet.section(a, "نام"), Ui.fill());
+        box.addView(name, Ui.fill());
+        box.addView(Sheet.item(a, "وقتی…", triggerText(javaTrigger(d)), Ui.ACCENT,
+                () -> autoTrigger(a, d)), Ui.fill());
+        box.addView(Sheet.item(a, "این کار را بکن…", actionText(javaAction(d)), Ui.ACCENT,
+                () -> autoAction(a, d)), Ui.fill());
+        box.addView(Sheet.divider(a), Ui.fill());
+        box.addView(Sheet.item(a, "ذخیره", null, Ui.GREEN, () -> {
+            d.name = name.getText().toString().trim();
+            autoSave(a, d);
+        }), Ui.fill());
+        Sheet.show(a, "اتوماسیون تازه", box);
+    }
+
+    private static JSONObject javaTrigger(Auto d) {
+        JSONObject t = new JSONObject();
+        try {
+            t.put("kind", d.triggerKind);
+            if (!d.pkg.isEmpty()) {
+                t.put("package", d.pkg);
+            }
+            if ("notification".equals(d.triggerKind) && !d.match.isEmpty()) {
+                t.put("match", d.match);
+            }
+            if ("time".equals(d.triggerKind)) {
+                t.put("cron", d.cron);
+            }
+        } catch (org.json.JSONException ignored) {
+            // update() only throws on a null key
+        }
+        return t;
+    }
+
+    private static JSONObject javaAction(Auto d) {
+        JSONObject o = new JSONObject();
+        try {
+            if ("intent".equals(d.actionKind)) {
+                o.put("intent", d.intent);
+                o.put("args", new JSONObject(d.args));
+            } else {
+                o.put("kind", d.actionKind);
+                o.put("text", d.text);
+                if ("agent_prompt".equals(d.actionKind)) {
+                    o.put("prompt", d.text);
+                }
+            }
+        } catch (org.json.JSONException ignored) {
+            // same
+        }
+        return o;
+    }
+
+    private static void autoTrigger(Activity a, Auto d) {
+        LinearLayout box = Ui.col(a);
+        box.addView(Sheet.item(a, "اعلان آمد", "از هر اپ یا یک اپ خاص، با یک کلمهٔ خاص",
+                "notification".equals(d.triggerKind) ? Ui.ACCENT : null,
+                () -> triggerNotif(a, d)), Ui.fill());
+        box.addView(Sheet.item(a, "اپی باز شد", "مثلاً وقتی تلگرام باز شد",
+                "app_open".equals(d.triggerKind) ? Ui.ACCENT : null,
+                () -> triggerApp(a, d)), Ui.fill());
+        box.addView(Sheet.item(a, "سر ساعت", "با عبارت کرون، مثل هر روز ۸ صبح",
+                "time".equals(d.triggerKind) ? Ui.ACCENT : null,
+                () -> triggerTime(a, d)), Ui.fill());
+        box.addView(Sheet.item(a, "فقط دستی", "تا وقتی خودت اجرا نکنی کاری نمی‌کند",
+                "manual".equals(d.triggerKind) ? Ui.ACCENT : null, () -> {
+                    d.triggerKind = "manual";
+                    autoDraft(a, d);
+                }), Ui.fill());
+        Sheet.show(a, "وقتی…", box);
+    }
+
+    private static void triggerNotif(Activity a, Auto d) {
+        LinearLayout box = Ui.col(a);
+        box.setPadding(Ui.dp(a, 18), Ui.dp(a, 4), Ui.dp(a, 18), Ui.dp(a, 12));
+        final EditText pkg = Ui.input(a, "* (هر اپ) یا com.whatsapp");
+        final EditText match = Ui.input(a, "کلمه‌ای که باید در اعلان باشد (اختیاری)");
+        pkg.setText(d.pkg);
+        match.setText(d.match);
+        box.addView(Sheet.section(a, "از کدام اپ"), Ui.fill());
+        box.addView(pkg, Ui.fill());
+        box.addView(Sheet.section(a, "با چه کلمه‌ای"), Ui.fill());
+        box.addView(match, Ui.fill());
+        box.addView(Sheet.item(a, "ثبت", null, Ui.GREEN, () -> {
+            d.triggerKind = "notification";
+            d.pkg = pkg.getText().toString().trim();
+            d.match = match.getText().toString().trim();
+            autoDraft(a, d);
+        }), Ui.fill());
+        Sheet.show(a, "اعلان آمد", box);
+    }
+
+    private static void triggerApp(Activity a, Auto d) {
+        LinearLayout box = Ui.col(a);
+        box.setPadding(Ui.dp(a, 18), Ui.dp(a, 4), Ui.dp(a, 18), Ui.dp(a, 12));
+        final EditText pkg = Ui.input(a, "* (هر اپ) یا org.telegram.messenger");
+        pkg.setText(d.pkg);
+        box.addView(Sheet.section(a, "کدام اپ باز شود"), Ui.fill());
+        box.addView(pkg, Ui.fill());
+        box.addView(Sheet.item(a, "ثبت", null, Ui.GREEN, () -> {
+            d.triggerKind = "app_open";
+            d.pkg = pkg.getText().toString().trim();
+            autoDraft(a, d);
+        }), Ui.fill());
+        Sheet.show(a, "اپی باز شد", box);
+    }
+
+    private static void triggerTime(Activity a, Auto d) {
+        LinearLayout box = Ui.col(a);
+        box.setPadding(Ui.dp(a, 18), Ui.dp(a, 4), Ui.dp(a, 18), Ui.dp(a, 12));
+        final EditText cron = Ui.input(a, "0 8 * * *");
+        cron.setText(d.cron);
+        box.addView(Sheet.section(a, "عبارت کرون (دقیقه ساعت روز ماه هفته)"), Ui.fill());
+        box.addView(cron, Ui.fill());
+        String[][] presets = {{"هر روز ۸ صبح", "0 8 * * *"}, {"هر ساعت", "0 * * * *"},
+                {"هر ۱۵ دقیقه", "*/15 * * * *"}};
+        for (String[] preset : presets) {
+            box.addView(Sheet.item(a, preset[0], ltr(preset[1]), null, () -> {
+                d.triggerKind = "time";
+                d.cron = preset[1];
+                autoDraft(a, d);
+            }), Ui.fill());
+        }
+        box.addView(Sheet.item(a, "ثبت", null, Ui.GREEN, () -> {
+            d.triggerKind = "time";
+            d.cron = cron.getText().toString().trim();
+            autoDraft(a, d);
+        }), Ui.fill());
+        Sheet.show(a, "سر ساعت", box);
+    }
+
+    private static void autoAction(Activity a, Auto d) {
+        LinearLayout box = Ui.col(a);
+        box.addView(Sheet.item(a, "یک دستور گوشی", "صدا، اسکرین‌شات، خانه، اعلان‌ها…",
+                "intent".equals(d.actionKind) ? Ui.ACCENT : null, () -> intentPicker(a, d)),
+                Ui.fill());
+        box.addView(Sheet.item(a, "به عامل بگو", "یک جملهٔ فارسی؛ مدل انجامش می‌دهد",
+                "agent_prompt".equals(d.actionKind) ? Ui.ACCENT : null, () -> textAction(a, d,
+                        "agent_prompt")), Ui.fill());
+        box.addView(Sheet.item(a, "اعلان نشان بده", "یک اعلان از خود جارویس",
+                "notify".equals(d.actionKind) ? Ui.ACCENT : null, () -> textAction(a, d,
+                        "notify")), Ui.fill());
+        Sheet.show(a, "این کار را بکن…", box);
+    }
+
+    private static void intentPicker(Activity a, Auto d) {
+        String[][] presets = {
+                {"خواندن اعلان‌ها", "notif_list", "{}"},
+                {"صدای کمتر", "volume", "{\"action\":\"down\"}"},
+                {"صدای بیشتر", "volume", "{\"action\":\"up\"}"},
+                {"بی‌صدا", "volume", "{\"action\":\"mute\"}"},
+                {"خانه", "key", "{\"name\":\"home\"}"},
+                {"اسکرین‌شات", "screenshot", "{}"},
+                {"وضعیت گوشی", "info", "{\"what\":\"time\"}"},
+                {"قرارهای امروز", "calendar_today", "{}"},
+        };
+        LinearLayout box = Ui.col(a);
+        for (String[] preset : presets) {
+            boolean active = "intent".equals(d.actionKind) && preset[1].equals(d.intent);
+            box.addView(Sheet.item(a, preset[0], ltr(preset[1]), active ? Ui.ACCENT : null,
+                    () -> {
+                        d.actionKind = "intent";
+                        d.intent = preset[1];
+                        d.args = preset[2];
+                        autoDraft(a, d);
+                    }), Ui.fill());
+        }
+        Sheet.show(a, "یک دستور گوشی", box);
+    }
+
+    private static void textAction(Activity a, Auto d, String kind) {
+        LinearLayout box = Ui.col(a);
+        box.setPadding(Ui.dp(a, 18), Ui.dp(a, 4), Ui.dp(a, 18), Ui.dp(a, 12));
+        final EditText text = Ui.input(a, "agent_prompt".equals(kind)
+                ? "از اعلان‌های امروز یک خلاصه بده" : "پیام آمد!");
+        text.setText(d.text);
+        box.addView(Sheet.section(a, "متن"), Ui.fill());
+        box.addView(text, Ui.fill());
+        box.addView(Sheet.item(a, "ثبت", null, Ui.GREEN, () -> {
+            d.actionKind = kind;
+            d.text = text.getText().toString().trim();
+            autoDraft(a, d);
+        }), Ui.fill());
+        Sheet.show(a, "agent_prompt".equals(kind) ? "به عامل بگو" : "اعلان نشان بده", box);
+    }
+
+    private static void autoSave(Activity a, Auto d) {
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("name", d.name);
+            payload.put("trigger", javaTrigger(d));
+            payload.put("action", javaAction(d));
+            payload.put("enabled", true);
+        } catch (org.json.JSONException e) {
+            toast(a, "ساخته نشد");
+            return;
+        }
+        AlertDialog spin = busy(a, "ذخیره…");
+        Api.post("/automations", payload, 40000, res -> {
+            spin.dismiss();
+            if (!res.optBoolean("ok", false)) {
+                toast(a, "نشد: " + res.optString("error", "?"));
+                return;
+            }
+            toast(a, res.optBoolean("pending", false)
+                    ? "ساخته شد، ولی تریگرش فعلاً کار نمی‌کند" : "ساخته شد");
+            automations(a);
+        }, msg -> {
+            spin.dismiss();
+            toast(a, "ساخته نشد: " + msg);
+        });
+    }
     // ------------------------------------------------------------------- access --
     /**
      * One place that says what Jarvis may actually reach, and grants it.
