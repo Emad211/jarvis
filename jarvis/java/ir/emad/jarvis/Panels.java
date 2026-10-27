@@ -586,50 +586,96 @@ final class Panels {
     static void voice(Activity a) {
         AlertDialog spin = busy(a, "تنظیمات صدا…");
         Api.get("/voice/config", 20000, cfg -> {
-            spin.dismiss();
-            String engine = cfg.optString("tts_provider", "gemini");
-            JSONObject keys = cfg.optJSONObject("has_key");
-            LinearLayout box = Ui.col(a);
-            box.addView(Sheet.section(a, "موتور صدا"), Ui.fill());
-            for (String id : new String[]{"elevenlabs", "gemini"}) {
-                boolean hasKey = keys != null && keys.optBoolean(id, false);
-                boolean on = id.equals(engine);
-                String label = "elevenlabs".equals(id)
-                        ? "ElevenLabs — صداهای فارسی" : "Gemini — رایگان با سهمیه";
-                String sub = on ? "فعال" : (hasKey ? "کلید دارد" : "بدون کلید");
-                box.addView(Sheet.item(a, label, sub, on ? Ui.ACCENT
-                        : (hasKey ? Ui.GREEN : null),
-                        () -> setVoice(a, Api.body("tts_provider", id), "موتور صدا")), Ui.fill());
-                box.addView(Sheet.divider(a), Ui.fill());
-            }
-
-            String current = "elevenlabs".equals(engine)
-                    ? cfg.optString("el_voice_id", "") : cfg.optString("tts_voice", "");
-            box.addView(Sheet.section(a, "صدا"), Ui.fill());
-            box.addView(Sheet.item(a, "انتخاب صدا",
-                            current.isEmpty() ? "فهرست صداهای همین موتور" : "فعلی: " + current,
-                            null, () -> voicePicker(a, engine, current)), Ui.fill());
-            box.addView(Sheet.divider(a), Ui.fill());
-            box.addView(Sheet.item(a, "مدل", "elevenlabs".equals(engine)
-                    ? cfg.optString("el_model", "") : cfg.optString("tts_model", ""), null,
-                    () -> modelPicker(a, engine)), Ui.fill());
-            box.addView(Sheet.divider(a), Ui.fill());
-            box.addView(Sheet.item(a, "یک جمله تست کن",
-                    "«سلام عماد، من جارویس هستم»", null, () -> {
-                        Api.post("/voice/out", Api.body("text",
-                                "سلام عماد، من جارویس هستم و آماده‌ام."), 90000, res -> {
-                            if (!res.optBoolean("ok", false)) {
-                                toast(a, "صدا نیامد: " + res.optString("error", "?"));
-                                return;
-                            }
-                            toast(a, res.optString("model", "") + " · " + res.optInt("ms", 0) + "ms");
-                        }, msg -> toast(a, "نشد: " + msg));
-                    }), Ui.fill());
-            Sheet.show(a, "صدا", box);
+            // Wake state is a second call on purpose: an older daemon has no /voice/wake, and that
+            // must not stop the rest of the panel from opening.
+            Api.get("/voice/wake", 12000,
+                    wake -> {
+                        spin.dismiss();
+                        voiceSheet(a, cfg, wake);
+                    },
+                    miss -> {
+                        spin.dismiss();
+                        voiceSheet(a, cfg, null);
+                    });
         }, msg -> {
             spin.dismiss();
             toast(a, "تنظیمات صدا نیامد: " + msg);
         });
+    }
+
+    /** One sheet: the engines, the voice, a test line, and the wake word when it is available. */
+    private static void voiceSheet(Activity a, JSONObject cfg, JSONObject wake) {
+        String engine = cfg.optString("tts_provider", "gemini");
+        JSONObject keys = cfg.optJSONObject("has_key");
+        LinearLayout box = Ui.col(a);
+        box.addView(Sheet.section(a, "موتور صدا"), Ui.fill());
+        for (String id : new String[]{"elevenlabs", "gemini"}) {
+            boolean hasKey = keys != null && keys.optBoolean(id, false);
+            boolean on = id.equals(engine);
+            String label = "elevenlabs".equals(id)
+                    ? "ElevenLabs — صداهای فارسی" : "Gemini — رایگان با سهمیه";
+            String sub = on ? "فعال" : (hasKey ? "کلید دارد" : "بدون کلید");
+            box.addView(Sheet.item(a, label, sub, on ? Ui.ACCENT : (hasKey ? Ui.GREEN : null),
+                    () -> setVoice(a, Api.body("tts_provider", id), "موتور صدا")), Ui.fill());
+            box.addView(Sheet.divider(a), Ui.fill());
+        }
+
+        String current = "elevenlabs".equals(engine)
+                ? cfg.optString("el_voice_id", "") : cfg.optString("tts_voice", "");
+        box.addView(Sheet.section(a, "صدا"), Ui.fill());
+        box.addView(Sheet.item(a, "انتخاب صدا",
+                current.isEmpty() ? "فهرست صداهای همین موتور" : "فعلی: " + current,
+                null, () -> voicePicker(a, engine, current)), Ui.fill());
+        box.addView(Sheet.divider(a), Ui.fill());
+        box.addView(Sheet.item(a, "مدل", "elevenlabs".equals(engine)
+                ? cfg.optString("el_model", "") : cfg.optString("tts_model", ""), null,
+                () -> modelPicker(a, engine)), Ui.fill());
+        box.addView(Sheet.divider(a), Ui.fill());
+        box.addView(Sheet.item(a, "یک جمله تست کن",
+                "«سلام عماد، من جارویس هستم»", null, () -> {
+                    Api.post("/voice/out", Api.body("text",
+                            "سلام عماد، من جارویس هستم و آماده‌ام."), 90000, res -> {
+                        if (!res.optBoolean("ok", false)) {
+                            toast(a, "صدا نیامد: " + res.optString("error", "?"));
+                            return;
+                        }
+                        toast(a, res.optString("model", "") + " · " + res.optInt("ms", 0) + "ms");
+                    }, msg -> toast(a, "نشد: " + msg));
+                }), Ui.fill());
+
+        if (wake != null) {
+            box.addView(Sheet.divider(a), Ui.fill());
+            box.addView(Sheet.section(a, "بیدارباش"), Ui.fill());
+            boolean on = wake.optBoolean("enabled", false);
+            boolean inSync = wake.optBoolean("in_sync", true);
+            String last = wake.optString("last_heard", "");
+            String wakeEngine = wake.optString("engine", "");
+            String sub = on ? (inSync ? "گوش می‌دهد" : "روشن است ولی چیزی گوش نمی‌دهد")
+                    : "خاموش";
+            if (!last.isEmpty()) {
+                sub += " · آخرین بار: «" + last + "»";
+            } else if (!wakeEngine.isEmpty()) {
+                sub += " · " + wakeEngine;
+            }
+            box.addView(Sheet.item(a,
+                    (on ? "خاموش کن" : "روشن کن") + " «"
+                            + wake.optString("phrase", "هی جارویس") + "»",
+                    sub, on ? (inSync ? Ui.GREEN : Ui.AMBER) : null,
+                    () -> Api.post("/voice/wake", Api.body("enabled", !on), 20000,
+                            r -> {
+                                toast(a, on ? "خاموش شد" : "روشن شد");
+                                voice(a);
+                            },
+                            m -> toast(a, "نشد: " + m))), Ui.fill());
+            if (on && !wakeEngine.isEmpty()) {
+                TextView note = Ui.text(a, "تشخیص روی خود گوشی (" + wakeEngine
+                        + ") انجام می‌شود؛ فقط بعد از شنیدن عبارت، صدا به سرور می‌رود.",
+                        11.5f, Ui.FAINT, false);
+                note.setLineSpacing(Ui.dp(a, 3), 1f);
+                box.addView(note, Ui.fill());
+            }
+        }
+        Sheet.show(a, "صدا", box);
     }
 
     private static void setVoice(Activity a, JSONObject body, String what) {

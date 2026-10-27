@@ -1134,30 +1134,211 @@ public class MainActivity extends Activity {
     }
 
     /** Provider → key → live test → default model. Everything is written by the daemon. */
+    /**
+     * First-run, for someone who is not technical.
+     *
+     * Every step is one screen with one action, in plain Persian: what this thing is, how to get a
+     * free model, how to prove it works, and where to speak. The provider instructions come from
+     * the daemon (`/setup/state` → `guides`) so the words here and the words the installer prints
+     * cannot drift apart, and each guide carries a measured `needs_vpn` flag — telling an Iranian
+     * user up front that Google needs a VPN is the difference between five minutes and "it's
+     * broken".
+     */
     private void setupWizard() {
-        Api.get("/setup/state", 12000, state -> {
-            JSONArray providers = state.optJSONArray("providers");
-            if (providers == null || providers.length() == 0) {
-                toast("لیست پرووایدرها نیامد");
+        Api.get("/setup/state", 20000, state -> setupWelcome(state),
+                msg -> toast("وضعیت راه‌اندازی نیامد: " + msg));
+    }
+
+    private void setupWelcome(JSONObject state) {
+        LinearLayout box = Ui.col(this);
+        box.setPadding(Ui.dp(this, 20), Ui.dp(this, 6), Ui.dp(this, 20), Ui.dp(this, 12));
+        TextView lead = Ui.text(this,
+                "جارویس روی همین گوشی کار می‌کند: می‌تواند جواب بدهد، جست‌وجو کند و کارهای گوشی "
+                        + "را انجام دهد. برای شروع فقط یک مدل لازم است — و لازم نیست پولی بدهی.",
+                13.5f, Ui.TEXT, false);
+        lead.setLineSpacing(Ui.dp(this, 5), 1f);
+        box.addView(lead, Ui.fill());
+        box.addView(Sheet.section(this, "چهار قدم"), Ui.fill());
+        box.addView(Sheet.item(this, "۱. یک مدل رایگان بگیر", "بدون خرید، بدون کارت بانکی",
+                Ui.ACCENT, () -> setupModels(state)), Ui.fill());
+        box.addView(Sheet.item(this, "۲. یک جمله امتحان کن", "تا مطمئن شوی کار می‌کند", null,
+                () -> setupTry(state)), Ui.fill());
+        box.addView(Sheet.item(this, "۳. دست‌های جارویس", "اجازه بده کارهای گوشی را انجام دهد", null,
+                () -> setupHands()), Ui.fill());
+        box.addView(Sheet.item(this, "۴. صدا و بیدارباش", "«هی جارویس» و پاسخ صوتی", null,
+                () -> Panels.voice(this)), Ui.fill());
+        box.addView(Sheet.divider(this), Ui.fill());
+        box.addView(Sheet.item(this, "بعداً", "هر وقت خواستی از منو → راه‌اندازی اولیه", null,
+                () -> { }), Ui.fill());
+        Sheet.show(this, "راه‌اندازی", box);
+    }
+
+    /** The screen that decides whether the whole product works for this person. */
+    private void setupModels(JSONObject state) {
+        LinearLayout box = Ui.col(this);
+        JSONObject omni = state.optJSONObject("omniroute");
+        JSONArray guides = state.optJSONArray("guides");
+        boolean running = omni != null && omni.optBoolean("running", false);
+        boolean installed = omni != null && omni.optBoolean("installed", false);
+        box.addView(Sheet.section(this, "پیشنهاد اول: بدون هیچ کلیدی"), Ui.fill());
+        box.addView(Ui.text(this, installed
+                ? (running ? "OmniRoute نصب است و اجرا می‌شود."
+                           : "OmniRoute نصب است ولی اجرا نمی‌شود.")
+                : "OmniRoute یک درگاه رایگان روی همین گوشی است (~۱ گیگ فضا). یک‌بار نصب کن، "
+                  + "بعدش با دکمهٔ تست ببین کار می‌کند یا نه.",
+                12.5f, Ui.DIM, false), Ui.fill());
+        if (!installed) {
+            box.addView(Sheet.item(this, "نصب OmniRoute", "حدود ۱ گیگ دانلود؛ ممکن است چند دقیقه طول بکشد",
+                    Ui.ACCENT, () -> setupInstallOmni()), Ui.fill());
+        } else {
+            box.addView(Sheet.item(this, "تست OmniRoute", "یک پیام واقعی می‌فرستد",
+                    Ui.GREEN, () -> setupTestOmni()), Ui.fill());
+        }
+        if (running) {
+            box.addView(Sheet.item(this, "باز کردن داشبورد", "وصل کردن سرویس‌های رایگان بیشتر",
+                    null, () -> openUrl(omni.optString("dashboard",
+                            "http://127.0.0.1:20128/dashboard"))), Ui.fill());
+        }
+        box.addView(Sheet.section(this, "یا کلید یکی از این‌ها را وصل کن"), Ui.fill());
+        for (int i = 0; guides != null && i < guides.length(); i++) {
+            JSONObject g = guides.optJSONObject(i);
+            if (g == null || "omniroute".equals(g.optString("id"))) {
+                continue;
+            }
+            String vpn = g.optBoolean("needs_vpn", false) ? " · VPN لازم است" : " · بدون VPN";
+            String sub = g.optString("cost", "") + vpn;
+            box.addView(Sheet.item(this, g.optString("label", ""), sub, null,
+                    () -> setupGuide(g, state)), Ui.fill());
+        }
+        Sheet.show(this, "یک مدل رایگان", box);
+    }
+
+    private void setupInstallOmni() {
+        AlertDialog spin = progress("نصب OmniRoute… (اولین بار چند دقیقه)");
+        Api.post("/omniroute/ensure", Api.body(), 2760000, res -> {
+            spin.dismiss();
+            boolean ok = res.optBoolean("ok", false);
+            toast(ok ? "نصب شد" : "نصب کامل نشد: " + res.optString("error", "?"));
+            if (ok) {
+                setupTestOmni();
+            } else {
+                setupWizard();
+            }
+        }, msg -> {
+            spin.dismiss();
+            toast("نصب نشد: " + msg);
+        });
+    }
+
+    private void setupTestOmni() {
+        AlertDialog spin = progress("یک پیام واقعی می‌فرستد…");
+        Api.post("/omniroute/test", Api.body(), 130000, res -> {
+            spin.dismiss();
+            if (res.optBoolean("ok", false)) {
+                toast("کار می‌کند: " + res.optInt("ms", 0) + "ms — «"
+                        + res.optString("reply", "").trim() + "»");
+                applyModel("omniroute", "auto");
+            } else {
+                String why = res.optString("error", "");
+                toast("هنوز نه: " + (why.isEmpty() ? "?" : why)
+                        + " — در داشبورد یک سرویس رایگان وصل کن");
+            }
+        }, msg -> {
+            spin.dismiss();
+            toast("تست نشد: " + msg);
+        });
+    }
+
+    /** One guide, numbered, with the site and the exact box to paste into. */
+    private void setupGuide(JSONObject guide, JSONObject state) {
+        LinearLayout box = Ui.col(this);
+        box.setPadding(Ui.dp(this, 20), Ui.dp(this, 6), Ui.dp(this, 20), Ui.dp(this, 12));
+        TextView what = Ui.text(this, guide.optString("what", ""), 13f, Ui.TEXT, false);
+        what.setLineSpacing(Ui.dp(this, 4), 1f);
+        box.addView(what, Ui.fill());
+        if (guide.optBoolean("needs_vpn", false)) {
+            box.addView(Sheet.item(this, "این سرویس از ایران باز نمی‌شود",
+                    "اگر VPN نداری، AvalAI را انتخاب کن", Ui.AMBER, () -> { }), Ui.fill());
+        } else {
+            box.addView(Sheet.item(this, "بدون VPN کار می‌کند",
+                    "همین را در تست اندازه گرفتیم", Ui.GREEN, () -> { }), Ui.fill());
+        }
+        JSONArray steps = guide.optJSONArray("steps");
+        box.addView(Sheet.section(this, "قدم‌ها"), Ui.fill());
+        for (int i = 0; steps != null && i < steps.length(); i++) {
+            String line = (i + 1) + ". " + steps.optString(i, "");
+            TextView row = Ui.text(this, line, 12.5f, Ui.DIM, false);
+            row.setLineSpacing(Ui.dp(this, 4), 1f);
+            row.setPadding(Ui.dp(this, 20), Ui.dp(this, 6), Ui.dp(this, 20), Ui.dp(this, 6));
+            box.addView(row, Ui.fill());
+        }
+        final String id = guide.optString("id", "");
+        final String url = guide.optString("url", "");
+        if (!url.isEmpty()) {
+            box.addView(Sheet.item(this, "باز کردن سایت", url, Ui.ACCENT,
+                    () -> openUrl(url)), Ui.fill());
+        }
+        box.addView(Sheet.item(this, "کلید را دارم — بچسبانم", "یک کادر ساده، فقط همین",
+                null, () -> askKeyGuide(id, guide)), Ui.fill());
+        Sheet.show(this, guide.optString("label", ""), box);
+    }
+
+    private void askKeyGuide(String id, JSONObject guide) {
+        LinearLayout box = Ui.col(this);
+        box.setPadding(Ui.dp(this, 20), Ui.dp(this, 6), Ui.dp(this, 20), Ui.dp(this, 12));
+        TextView help = Ui.text(this,
+                "کلید یک رشتهٔ طولانی است که آن سایت بعد از ثبت‌نام به تو می‌دهد. کپی کن و همین‌جا "
+                        + "بچسبان. فقط روی همین گوشی ذخیره می‌شود.", 12.5f, Ui.DIM, false);
+        help.setLineSpacing(Ui.dp(this, 4), 1f);
+        box.addView(help, Ui.fill());
+        final EditText key = Ui.input(this, "کلید را اینجا بچسبان");
+        key.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        key.setTextDirection(View.TEXT_DIRECTION_LTR);
+        box.addView(key, Ui.margins(Ui.fill(), this, 0, 10, 0, 10));
+        box.addView(Sheet.item(this, "ذخیره و تست", "اگر درست باشد، سبز می‌شود",
+                Ui.GREEN, () -> {
+                    String value = key.getText().toString().trim();
+                    if (value.isEmpty()) {
+                        toast("کادر خالی است");
+                        return;
+                    }
+                    saveKeyGuide(id, value);
+                }), Ui.fill());
+        Sheet.show(this, "کلید " + guide.optString("label", ""), box);
+    }
+
+    private void saveKeyGuide(String id, String key) {
+        AlertDialog spin = progress("ذخیره و تست…");
+        Api.post("/setup/key", Api.body("provider", id, "key", key), 30000, res -> {
+            spin.dismiss();
+            if (!res.optBoolean("ok", false)) {
+                toast("ذخیره نشد: " + res.optString("error", "?"));
                 return;
             }
-            final List<String> ids = new ArrayList<>();
-            final List<String> labels = new ArrayList<>();
-            for (int i = 0; i < providers.length(); i++) {
-                JSONObject p = providers.optJSONObject(i);
-                if (p == null) {
-                    continue;
-                }
-                ids.add(p.optString("id", ""));
-                labels.add(p.optString("label", "") + (p.optBoolean("has_key") ? "  ✓" : ""));
-            }
-            new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-                    .setTitle("کدام پرووایدر؟")
-                    .setItems(labels.toArray(new String[0]), (d, which) ->
-                            askKey(providerById(providers, ids.get(which)), providers))
-                    .setNegativeButton("بعداً", null)
-                    .show();
-        }, msg -> toast("وضعیت راه‌اندازی نیامد: " + msg));
+            toast("ذخیره شد؛ حالا همه را تست می‌کنیم");
+            autoselect();
+        }, msg -> {
+            spin.dismiss();
+            toast("ذخیره نشد: " + msg);
+        });
+    }
+
+    private void setupTry(JSONObject state) {
+        LinearLayout box = Ui.col(this);
+        box.setPadding(Ui.dp(this, 20), Ui.dp(this, 6), Ui.dp(this, 20), Ui.dp(this, 12));
+        box.addView(Ui.text(this,
+                "یک جملهٔ ساده بنویس؛ اگر جواب آمد، همه‌چیز سر جایش است.", 13f, Ui.TEXT, false),
+                Ui.fill());
+        box.addView(Sheet.item(this, "بزن و شروع کن", "پیام نمونه در کادر نوشته می‌شود",
+                Ui.ACCENT, () -> {
+                    input.setText("سلام! خودت را در یک جمله معرفی کن");
+                    input.setSelection(input.getText().length());
+                }), Ui.fill());
+        Sheet.show(this, "امتحان", box);
+    }
+
+    private void setupHands() {
+        Panels.access(this);
     }
 
     private static JSONObject providerById(JSONArray providers, String id) {

@@ -48,6 +48,7 @@ import base64
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -1213,6 +1214,85 @@ def sync_builtins() -> None:
             print("jarvisd: sync %s failed: %s" % (row.get("id"), exc), flush=True)
 
 
+# ------------------------------------------------------------------ first-run guides --
+# The wizard is the whole product for a non-technical person: if these words do not tell them
+# exactly what to tap, no amount of engine behind it matters. Each guide is data, not UI, so the
+# app renders the same steps the installer prints and neither can drift from the other.
+#
+# `needs_vpn` is measured, not guessed: from an Iranian mobile network `api.avalai.ir` answered in
+# ~1 s while Google and OpenRouter timed out (2026-10-26), and River/ElevenLabs are blocked at the
+# host level. Saying "VPN لازم است" up front is the difference between a five-minute win and a
+# user who concludes the app is broken.
+GUIDES = [
+    {"id": "omniroute", "label": "OmniRoute — رایگان، روی همین گوشی", "free": True,
+     "needs_vpn": False, "order": 1,
+     "what": "یک درگاه روی گوشی که چند سرویس رایگان را پشت یک آدرس جمع می‌کند.",
+     "cost": "بدون خرید، بدون کلید — کلیدش را خودش می‌سازد (حدود ۱ گیگ فضا)",
+     "url": "http://127.0.0.1:20128/dashboard",
+     "steps": ["دکمهٔ «نصب OmniRoute» را بزن و صبر کن تا بنویسد «در حال اجرا».",
+               "دکمهٔ «تست» را بزن؛ اگر سبز شد، از همین حالا می‌توانی با جارویس حرف بزنی.",
+               "برای مدل‌های بیشتر، در داشبورد یکی از سرویس‌های رایگان را وصل کن."],
+     "chatty": "این را اول امتحان کن: هیچ کلیدی لازم ندارد."},
+    {"id": "avalai", "label": "AvalAI — بدون VPN کار می‌کند", "free": True,
+     "needs_vpn": False, "order": 2,
+     "what": "یک درگاه ایرانی که مدل‌های خارجی را با کلید می‌دهد.",
+     "cost": "ثبت‌نام رایگان؛ سهمیهٔ رایگان روزانه",
+     "url": "https://avalai.ir",
+     "steps": ["دکمهٔ «باز کردن سایت» را بزن.",
+               "ثبت‌نام کن و از پنل، «کلید API» را بساز و کپی کن.",
+               "برگرد به همین صفحه، کلید را در کادر بچسبان و «ذخیره و تست» را بزن."],
+     "chatty": "تنها گزینه‌ای که اندازه‌گیری کردیم بدون VPN جواب می‌دهد."},
+    {"id": "google_ai_studio", "label": "Google AI Studio — کلید رایگان", "free": True,
+     "needs_vpn": True, "order": 3,
+     "what": "کلید رایگان گوگل برای مدل‌های Gemini؛ برای صدا هم کاربرد دارد.",
+     "cost": "رایگان با محدودیت روزانه (بدون کارت بانکی)",
+     "url": "https://aistudio.google.com/apikey",
+     "steps": ["با VPN وصل شو (این سرویس از ایران باز نمی‌شود).",
+               "دکمهٔ «باز کردن سایت» را بزن و با حساب گوگل وارد شو.",
+               "«Create API key» را بزن، کلید را کپی کن و اینجا بچسبان."],
+     "chatty": "اگر VPN داری، این سخاوتمندترین سهمیهٔ رایگان است."},
+    {"id": "openrouter", "label": "OpenRouter — مدل‌های free", "free": True,
+     "needs_vpn": True, "order": 4,
+     "what": "صدها مدل؛ بعضی‌هایشان با پسوند free کاملاً رایگان‌اند.",
+     "cost": "رایگان برای مدل‌های :free",
+     "url": "https://openrouter.ai/keys",
+     "steps": ["با VPN وصل شو.",
+               "دکمهٔ «باز کردن سایت» را بزن، ثبت‌نام کن و یک کلید بساز.",
+               "کلید را اینجا بچسبان و تست کن."],
+     "chatty": "مدل‌های :free اینجا بدون هزینه‌اند."},
+]
+
+
+def _last_omni_test() -> Dict[str, Any]:
+    """The verdict of the last real chat through OmniRoute, if there ever was one."""
+    try:
+        with open(os.path.join(HERMES, "jarvis", "omniroute_last_test.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:  # noqa: BLE001
+        return {}
+def omniroute_state() -> Dict[str, Any]:
+    """What the bundled gateway is doing, without pretending.
+
+    Four facts, because a single green light lies: it can be installed and not running, or running
+    with no key, or keyed with every provider pool empty (which is a *fresh* OmniRoute install).
+    """
+    cli = os.path.join(HOME, ".local", "bin", "jarvis-omniroute")
+    out: Dict[str, Any] = {"installed": False, "running": False, "key_set": False,
+                           "models": 0, "port": 20128,
+                           "dashboard": "http://127.0.0.1:20128/dashboard",
+                           "cli": os.path.isfile(cli)}
+    if not out["cli"]:
+        return out
+    try:
+        p = subprocess.run([cli, "status"], capture_output=True, text=True, timeout=40)
+        for line in reversed((p.stdout or "").strip().splitlines()):
+            if line.strip().startswith("{"):
+                out.update(json.loads(line))
+                break
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = type(exc).__name__
+    return out
+
 @app.get("/setup/state")
 def setup_state():
     cfg = load_config()
@@ -1221,8 +1301,15 @@ def setup_state():
         providers.append(dict(p, has_key=bool(read_env(p["key_env"])),
                               key_length=len(read_env(p["key_env"]))))
     model = cfg.get("model") or {}
+    omni = omniroute_state()
     return {"ok": True, "port": PORT, "version": VERSION,
+            # A catalogue of 465 models is NOT a working provider — measured: a fresh OmniRoute
+            # answers `auto` with 502 until one provider is connected. So the wizard opens on
+            # "no provider key at all", and `ready` reports the last real test instead.
             "needs_setup": not any(p["has_key"] for p in providers),
+            "ready": bool(_last_omni_test().get("ok")),
+            "guides": GUIDES,
+            "omniroute": omni,
             "config": {"exists": os.path.exists(os.path.join(HERMES, "config.yaml")),
                        "provider": model.get("provider", ""),
                        "model": model.get("default", "")},
