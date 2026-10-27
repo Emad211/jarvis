@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
@@ -95,6 +96,82 @@ public class MainActivity extends Activity {
             Notif.rebind(this);
         }
         connect(true);
+        handleWakeIntent(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleWakeIntent(intent);
+    }
+
+    /** The daemon the service should report wake state to (the console already knows it). */
+    static String daemonBase(Context ctx) {
+        return Api.base();
+    }
+
+    /**
+     * Intents from `WakeService` (or adb, while testing):
+     *   wake_text  — a command heard after «هی جارویس»: run it like a typed message
+     *   wake_on    — start always-listening (the user, or the voice panel, asked for it)
+     *   wake_off   — stop it and say so
+     */
+    private void handleWakeIntent(Intent it) {
+        if (it == null) {
+            return;
+        }
+        String text = it.getStringExtra("wake_text");
+        if (text != null && !text.trim().isEmpty()) {
+            // The phrase already woke the phone; the command becomes the next turn, spoken
+            // back through the normal TTS path because ttsOn is what the console decided.
+            final String command = text.trim();
+            it.removeExtra("wake_text");
+            ui.postDelayed(() -> {
+                if (sessionId.isEmpty()) {
+                    ui.postDelayed(() -> sendWakeCommand(command), 600);
+                } else {
+                    sendWakeCommand(command);
+                }
+            }, 250);
+        }
+        if (it.getBooleanExtra("wake_on", false)) {
+            it.removeExtra("wake_on");
+            setWake(true);
+        }
+        if (it.getBooleanExtra("wake_off", false)) {
+            it.removeExtra("wake_off");
+            setWake(false);
+        }
+    }
+
+    private void sendWakeCommand(String command) {
+        input.setText(command);
+        input.setSelection(input.length());
+        send(true);
+    }
+
+    /** Turn always-listening on or off, honestly: no mic permission, no toggle. */
+    void setWake(boolean on) {
+        prefs.edit().putBoolean("wake", on).apply();
+        if (on) {
+            if (checkSelfPermission("android.permission.RECORD_AUDIO")
+                    != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{"android.permission.RECORD_AUDIO"}, 3);
+                return;
+            }
+            if (android.os.Build.VERSION.SDK_INT >= 33
+                    && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                    != PackageManager.PERMISSION_GRANTED) {
+                // The notification is the promise that the phone is not listening silently.
+                requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 3);
+            }
+            WakeService.start(this);
+            toast("حالت شنیدن روشن شد: «" + Wake.PHRASE + "»");
+        } else {
+            WakeService.stop(this);
+            toast("حالت شنیدن خاموش شد");
+        }
     }
 
     @Override
@@ -705,6 +782,16 @@ public class MainActivity extends Activity {
         if (requestCode == 1 && granted.length > 0
                 && granted[0] == PackageManager.PERMISSION_GRANTED) {
             toggleMic();
+        }
+        if (requestCode == 3) {
+            // wake word needs the microphone; without it there is no honest toggle
+            if (checkSelfPermission("android.permission.RECORD_AUDIO")
+                    == PackageManager.PERMISSION_GRANTED) {
+                WakeService.start(this);
+                toast("حالت شنیدن روشن شد: «" + Wake.PHRASE + "»");
+            } else {
+                toast("بدون اجازهٔ میکروفون نمی‌شود گوش داد");
+            }
         }
     }
 

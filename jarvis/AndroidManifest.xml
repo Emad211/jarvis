@@ -10,6 +10,12 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Always-listening (WakeService): Android 14+ only allows a long microphone session from a
+         foreground service that declares this type, and the visible notification is part of the
+         deal — the phone never listens invisibly. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- Read-only access to the phone's own data (Data.java). Runtime permissions: the user grants
          each one in-app, and Data.handle answers {ok:false, needs:"<name>"} until they do.
@@ -77,5 +83,14 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+
+        <!-- The wake word (Wake.java + WakeService.java). `foregroundServiceType="microphone"`
+             is what Android 14+ demands for a long mic session; `exported=false` because only
+             this app starts it, from a tap the user made. -->
+        <service
+            android:name=".WakeService"
+            android:exported="false"
+            android:foregroundServiceType="microphone"
+            android:label="Jarvis wake word" />
     </application>
 </manifest>

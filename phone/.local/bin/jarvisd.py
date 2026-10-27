@@ -784,7 +784,7 @@ def _set_persona(sid: str, pid: str) -> bool:
     return True
 for _mod_name in ("jarvisd_personas", "jarvisd_tools", "jarvisd_ops", "jarvisd_voice",
                   "jarvisd_research", "jarvisd_bots", "jarvisd_automation",
-                  "jarvisd_sessions", "jarvisd_project"):
+                  "jarvisd_sessions", "jarvisd_project", "jarvisd_omniroute"):
     try:
         _mod = __import__(_mod_name)
         _mod.register(app, CTX)
@@ -868,7 +868,18 @@ PROVIDERS = [
     # api.avalai.ir answered in 0.77 s for the model list and 1.02 s for a real chat, while
     # api.river.ai / openrouter.ai / api.telegram.org all timed out. This is what makes the
     # console usable without a VPN.
-    {"id": "avalai", "label": "AvalAI", "key_env": "AVALAI_API_KEY",
+    # Bundled with the installer: an OpenAI-compatible gateway on the phone that routes to other
+# providers' **free tiers**. It owns its own key (`OMNIROUTE_API_KEY`), so a fresh install has a
+# working provider before the user has an account anywhere. `auto` picks among whatever pools are
+# connected — which is why `/omniroute` reports four separate facts instead of one green light.
+{"id": "omniroute", "label": "OmniRoute (رایگان)", "key_env": "OMNIROUTE_API_KEY",
+ "key_url": "http://127.0.0.1:20128/dashboard", "voice": False, "kind": "openai",
+ "base_url": "http://127.0.0.1:20128/v1", "local": True,
+ "note": "مدل‌های رایگان، روی همین گوشی",
+ "models": [
+ {"id": "auto", "label": "auto (هر مسیر آزادی که وصل باشد)", "tools": True, "vision": False},
+ ]},
+{"id": "avalai", "label": "AvalAI", "key_env": "AVALAI_API_KEY",
      "key_url": "https://avalai.ir", "voice": False, "kind": "openai",
      "base_url": "https://api.avalai.ir/v1",
      "note": "بدون نیاز به VPN",

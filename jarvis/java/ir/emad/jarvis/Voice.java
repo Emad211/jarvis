@@ -212,6 +212,8 @@ final class Voice {
     }
 
     private void play(String url) {
+        // Keep the wake engine deaf while we talk: the answer must never wake Jarvis again.
+        WakeService.speaking(a, 12000);
         try {
             player = new MediaPlayer();
             player.setAudioStreamType(AudioManager.STREAM_MUSIC);

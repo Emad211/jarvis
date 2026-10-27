@@ -1,0 +1,267 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# jarvis-omniroute — the "try before you pay" door, installed and supervised by us.
+#
+# Why this exists: a stranger who installs Jarvis has no provider key and no intention of buying
+# one before seeing whether the thing is any good. OmniRoute is an open-source gateway (npm
+# `omniroute`) that speaks the OpenAI API on 127.0.0.1:20128 and routes to the free tiers of many
+# providers. Bundling it is what makes the first five minutes free.
+#
+# Three things measured on this phone (2026-10-27) shaped the script:
+#   * npm 11 refuses install scripts by default, so a plain `npm i -g omniroute` exits 0 with a
+#     **missing binary** — the install needs `--allow-scripts=…`.
+#   * the package is ~1 GB unpacked and leaves a ~1.3 GB npm cache behind; the cache is cleaned
+#     here, or a 14 GB phone loses a quarter of its space to one feature.
+#   * it must survive a dropped SSH session, so the long step runs detached and is polled.
+#
+# Everything is idempotent: `ensure` may be run on every boot.
+set -uo pipefail
+
+HOME_DIR="${HOME:-/data/data/com.termux/files/home}"
+PORT="${OMNIROUTE_PORT:-20128}"
+BASE="http://127.0.0.1:${PORT}/v1"
+STATE_DIR="$HOME_DIR/.hermes/jarvis"
+KEY_FILE="$HOME_DIR/.hermes/.env"
+LOG="$HOME_DIR/.hermes/logs/omniroute.log"
+SCRIPTS="omniroute,@parcel/watcher,@swc/core,esbuild"
+mkdir -p "$STATE_DIR" "$HOME_DIR/.hermes/logs" 2>/dev/null
+
+json() { printf '%s\n' "$1"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+installed() { have omniroute; }
+
+running() {
+    # The gateway answers /v1/models once it is up; a bare port check would lie during boot.
+    curl -s -m 2 -o /dev/null "http://127.0.0.1:${PORT}/v1/models" && return 0
+    return 1
+}
+
+key_set() {
+    # Presence only. The value never leaves the env file and is never printed.
+    [ -f "$KEY_FILE" ] && grep -q '^OMNIROUTE_API_KEY=..' "$KEY_FILE" 2>/dev/null
+}
+
+# ------------------------------------------------------------------ install --
+do_install() {
+    if installed; then
+        json "{\"ok\":true,\"step\":\"install\",\"already\":true}"
+        return 0
+    fi
+    if ! have node || ! have npm; then
+        # Termux needs the distro node; there is no Android-provided one.
+        pkg install -y nodejs >/dev/null 2>&1 || {
+            json "{\"ok\":false,\"error\":\"no_node\",\"detail\":\"pkg install nodejs failed\"}"
+            return 1
+        }
+    fi
+    # Detached: the download is ~1 GB over whatever link the phone has, and an SSH drop must not
+    # kill it. The loop below watches the marker line, not the process.
+    rm -f "$LOG.done"
+    nohup setsid bash -c "npm i -g omniroute --no-audit --no-fund --allow-scripts=$SCRIPTS \
+        >> '$LOG' 2>&1; echo \$? > '$LOG.done'" >/dev/null 2>&1 &
+    local waited=0
+    while [ ! -f "$LOG.done" ]; do
+        sleep 5
+        waited=$((waited + 5))
+        # 45 min: a slow mobile link is normal, a hang is not.
+        if [ "$waited" -ge 2700 ]; then
+            json "{\"ok\":false,\"error\":\"install_timeout\",\"waited_s\":$waited}"
+            return 1
+        fi
+    done
+    local rc
+    rc="$(cat "$LOG.done" 2>/dev/null || echo 1)"
+    rm -f "$LOG.done"
+    installed || {
+        json "{\"ok\":false,\"error\":\"install_failed\",\"rc\":$rc,\"log\":\"$LOG\"}"
+        return 1
+    }
+    # 1.3 GB of cache for a feature that is now installed — do not keep two copies.
+    npm cache clean --force >/dev/null 2>&1
+    json "{\"ok\":true,\"step\":\"install\",\"rc\":$rc}"
+}
+
+# -------------------------------------------------------------------- start --
+do_start() {
+    if running; then
+        json "{\"ok\":true,\"step\":\"start\",\"already\":true}"
+        return 0
+    fi
+    # `hermes-svc` already knows this unit (`router`), so start it the supervised way — a bare
+    # nohup would lose the process on the next tmux cleanup.
+    hermes-svc start router >/dev/null 2>&1 || true
+    local waited=0
+    while [ "$waited" -lt 90 ]; do
+        if running; then
+            json "{\"ok\":true,\"step\":\"start\",\"waited_s\":$waited}"
+            return 0
+        fi
+        sleep 3
+        waited=$((waited + 3))
+    done
+    json "{\"ok\":false,\"error\":\"not_listening\",\"port\":$PORT,\"log\":\"$LOG\"}"
+    return 1
+}
+
+# ---------------------------------------------------------------------- key --
+# OmniRoute issues its own key (Dashboard → Endpoints). Three ways in, tried in order, and the
+# key is written straight to the env file where every other provider key lives.
+do_key() {
+    if key_set; then
+        json "{\"ok\":true,\"step\":\"key\",\"already\":true,\"source\":\"env\"}"
+        return 0
+    fi
+    local key=""
+    local source=""
+    # (1) an API the dashboard itself uses
+    for path in /api/keys /api/endpoints/keys /api/v1/keys; do
+        local body
+        body="$(curl -s -m 5 "http://127.0.0.1:${PORT}${path}" 2>/dev/null)"
+        case "$body" in
+            *'"key"'*|*'"token"'*)
+                key="$(printf '%s' "$body" | python3 -c '
+import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+rows = d if isinstance(d, list) else (d.get("keys") or d.get("data") or [d])
+for r in rows if isinstance(rows, list) else []:
+    if isinstance(r, dict):
+        v = r.get("key") or r.get("token") or ""
+        if isinstance(v, str) and len(v) >= 12:
+            print(v); break
+' 2>/dev/null)"
+                [ -n "$key" ] && source="api:${path}"
+                ;;
+        esac
+        [ -n "$key" ] && break
+    done
+    # (2) a config/db file the gateway wrote for itself
+    if [ -z "$key" ]; then
+        for f in "$HOME_DIR/.omniroute/config.json" "$HOME_DIR/.config/omniroute/config.json" \
+                 "$HOME_DIR/.omniroute/omniroute.json"; do
+            [ -f "$f" ] || continue
+            key="$(python3 - "$f" <<'PY' 2>/dev/null
+import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+def walk(o):
+    if isinstance(o, dict):
+        for k,v in o.items():
+            if k.lower() in ("apikey","api_key","key","token") and isinstance(v,str) and len(v)>=12:
+                return v
+            r = walk(v)
+            if r: return r
+    elif isinstance(o, list):
+        for v in o:
+            r = walk(v)
+            if r: return r
+    return ""
+print(walk(d))
+PY
+)"
+            [ -n "$key" ] && source="file:${f#${HOME_DIR}/}"
+            [ -n "$key" ] && break
+        done
+    fi
+    # (3) generate one through the gateway's own API
+    if [ -z "$key" ]; then
+        local made
+        made="$(curl -s -m 8 -X POST "http://127.0.0.1:${PORT}/api/keys" \
+            -H 'Content-Type: application/json' -d '{"name":"jarvis"}' 2>/dev/null)"
+        key="$(printf '%s' "$made" | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+v = d.get("key") or d.get("token") or (d.get("data") or {}).get("key") or ""
+print(v if isinstance(v,str) and len(v)>=12 else "")
+' 2>/dev/null)"
+        [ -n "$key" ] && source="created"
+    fi
+    if [ -z "$key" ]; then
+        # Honest dead end: the user copies one key once, from a page that is already on the phone.
+        json "{\"ok\":false,\"error\":\"needs_dashboard\",\"url\":\"http://127.0.0.1:${PORT}/dashboard/endpoints\",\"detail\":\"کلید OmniRoute را از داشبورد یکی‌بار کپی کن\"}"
+        return 2
+    fi
+    if grep -q '^OMNIROUTE_API_KEY=' "$HOME_DIR/.hermes/.env" 2>/dev/null; then
+        sed -i "s|^OMNIROUTE_API_KEY=.*|OMNIROUTE_API_KEY=${key}|" "$HOME_DIR/.hermes/.env"
+    else
+        printf 'OMNIROUTE_API_KEY=%s\n' "$key" >> "$HOME_DIR/.hermes/.env"
+    fi
+    chmod 600 "$HOME_DIR/.hermes/.env" 2>/dev/null
+    json "{\"ok\":true,\"step\":\"key\",\"source\":\"$source\"}"
+}
+
+# --------------------------------------------------------------------- test --
+do_test() {
+    local text="${1:-سلام}"
+    key_set || { json "{\"ok\":false,\"error\":\"no_key\"}"; return 1; }
+    local key
+    key="$(grep '^OMNIROUTE_API_KEY=' "$KEY_FILE" | head -1 | cut -d= -f2-)"
+    local started
+    started="$(date +%s%3N 2>/dev/null || python3 -c 'import time;print(int(time.time()*1000))')"
+    local body
+    body="$(python3 - "$text" <<'PY'
+import json,sys
+print(json.dumps({"model":"auto","messages":[{"role":"user","content":sys.argv[1]}],"max_tokens":64}))
+PY
+)"
+    local res
+    res="$(curl -s -m 90 -X POST "http://127.0.0.1:${PORT}/v1/chat/completions" \
+        -H "Authorization: Bearer ${key}" -H 'Content-Type: application/json' -d "$body" 2>&1)"
+    local ms
+    ms=$(( $(date +%s%3N 2>/dev/null || python3 -c 'import time;print(int(time.time()*1000))') - started ))
+    printf '%s' "$res" | python3 -c '
+import json,sys
+ms=int(sys.argv[1])
+raw=sys.stdin.read()
+try:
+    d=json.loads(raw)
+except Exception:
+    print(json.dumps({"ok":False,"ms":ms,"error":"bad_json","detail":raw[:200]}))
+    sys.exit(0)
+if "error" in d and d.get("error"):
+    e=d["error"]
+    print(json.dumps({"ok":False,"ms":ms,"error":(e.get("message") if isinstance(e,dict) else str(e))[:200]}))
+else:
+    ch=(d.get("choices") or [{}])[0]
+    msg=(ch.get("message") or {}).get("content") or ""
+    print(json.dumps({"ok":True,"ms":ms,"model":d.get("model",""),"reply":msg[:200]}, ensure_ascii=False))
+' "$ms"
+}
+
+# ------------------------------------------------------------------- status --
+do_status() {
+    local inst="false" run="false" key="false" models=0
+    installed && inst="true"
+    running && run="true"
+    key_set && key="true"
+    if [ "$run" = "true" ] && [ "$key" = "true" ]; then
+        models="$(curl -s -m 5 "http://127.0.0.1:${PORT}/v1/models" -H "Authorization: Bearer $(grep '^OMNIROUTE_API_KEY=' "$KEY_FILE" | head -1 | cut -d= -f2-)" 2>/dev/null | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: print(0); raise SystemExit
+print(len(d.get("data") or d.get("models") or []))
+' 2>/dev/null || echo 0)"
+    fi
+    json "{\"ok\":true,\"installed\":$inst,\"running\":$run,\"key_set\":$key,\"port\":$PORT,\"models\":${models:-0},\"dashboard\":\"http://127.0.0.1:${PORT}/dashboard\"}"
+}
+
+case "${1:-status}" in
+    status) do_status ;;
+    ensure)
+        # The whole promise in one verb: install, start, key, then say what actually works.
+        do_install || exit 1
+        do_start || exit 1
+        do_key || true
+        do_status
+        ;;
+    start) do_start ;;
+    install) do_install ;;
+    key) do_key ;;
+    test) shift; do_test "${1:-سلام}" ;;
+    *) echo '{"ok":false,"error":"usage: jarvis-omniroute status|ensure|install|start|key|test [text]"}' ;;
+esac

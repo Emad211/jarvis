@@ -9,6 +9,8 @@ choice, the audio normalisation and the numbers behind `/voice/status`.
     POST /voice/out       {text, voice?, provider?}                     -> {ok, url, ms, model}
     POST /voice/stream    raw WAV body                                  -> SSE partial* + final
     GET  /voice/status                                                  -> {stt_model, stt_ms, tts_model, tts_ms, ready}
+    GET  /voice/wake                                                    -> {enabled, phrase, engine, listening, last_heard}
+    POST /voice/wake      {enabled?, phrase?}                           -> the same, stored
     POST /voice/probe     {}                                            -> round trip, measured
     GET  /audio/{name}                                                  (already served by jarvisd)
 
@@ -83,6 +85,8 @@ MAX_SECONDS = 60.0          # longer than this is a recording, not an utterance
 SILENCE_PEAK = 250          # |s16| peak below this = no speech at all (about -42 dBFS)
 TRIM_FLOOR = 180            # frame RMS below this counts as silence when trimming
 STT_PROMPT = "Transcribe this speech verbatim, in its own language, no commentary."
+LANG_NAMES = {"fa": "Persian (Farsi)", "en": "English", "de": "German", "tr": "Turkish",
+              "ar": "Arabic"}
 
 DEFAULTS: Dict[str, Any] = {
     # The specialist STT model has almost no free-tier quota (429 today), so the general
@@ -109,6 +113,9 @@ DEFAULTS: Dict[str, Any] = {
     # A full sentence, not a fragment: LLM-based STT hallucinates on 2-3 word clips, so a
     # probe with a real sentence is the only honest round-trip check.
     "probe_text": "این یک آزمایش کوتاه برای صدای فارسی جارویس است.",
+    # Wake word (see docs/jarvis-wakeword.md). The phrase is matched on the phone, offline;
+    # the daemon only stores what the service reports.
+    "wake_phrase": "هی جارویس",
 }
 
 SECRET_RE = re.compile(r"(AIza[A-Za-z0-9_-]{10,}|sk-[A-Za-z0-9]{8,}"
@@ -614,12 +621,20 @@ async def _post(url: str, *, headers: Dict[str, str], json_body: Any = None,
 
 
 # ------------------------------------------------------------------------------- STT --
-def _gem_stt_body(wav: bytes) -> Dict[str, Any]:
+def _gem_stt_body(wav: bytes, lang: str = "") -> Dict[str, Any]:
     # Plain generateContent with the audio inline: no temperature / responseModalities,
     # because the transcribe models reject or empty out on some of those fields.
+    prompt = STT_PROMPT
+    if lang:
+        # Measured 2026-10-27: without this hint, a short Persian command that follows a long
+        # stretch of silence came back transliterated in Latin («Telegram ro Požun»); with it
+        # the same audio comes back in Persian script.
+        prompt = STT_PROMPT + (
+            " The speaker is speaking %s; write the transcript in that language's own"
+            " script, never transliterated." % LANG_NAMES.get(lang, lang))
     return {"contents": [{"parts": [
         {"inlineData": {"mimeType": "audio/wav", "data": base64.b64encode(wav).decode()}},
-        {"text": STT_PROMPT},
+        {"text": prompt},
     ]}]}
 
 
@@ -633,7 +648,7 @@ async def _stt_gemini(model: str, wav: bytes, lang: str = "") -> Tuple[str, int]
     if not key:
         raise RuntimeError("no-gemini-key")
     resp = await _post("%s/models/%s:generateContent" % (GEMINI, model),
-                       headers={"x-goog-api-key": key}, json_body=_gem_stt_body(wav))
+                       headers={"x-goog-api-key": key}, json_body=_gem_stt_body(wav, lang))
     if resp.status_code != 200:
         raise RuntimeError("http-%d %s" % (resp.status_code, redact(resp.text[:160])))
     return _gem_text(resp.json()), resp.status_code
@@ -759,7 +774,8 @@ async def transcribe_stream(wav_bytes: bytes):
     acc, first, events = "", None, 0
     try:
         async with _client().stream("POST", url, headers={"x-goog-api-key": key},
-                                    json=_gem_stt_body(prep.wav)) as resp:
+                                    json=_gem_stt_body(prep.wav,
+                                                       str(cfg.get("stt_language") or ""))) as resp:
             if resp.status_code != 200:
                 detail = redact((await resp.aread()).decode("utf-8", "replace")[:160])
                 raise RuntimeError("http-%d %s" % (resp.status_code, detail))
@@ -1042,6 +1058,96 @@ def _audio_seconds(path: str) -> float:
         return 0.0
 
 
+# ------------------------------------------------------------------- wake word state --
+# The microphone lives in the app (`WakeService`), so the daemon cannot know by itself whether
+# the phone is listening: the service pushes its truth here and the panel renders THIS. The
+# daemon keeps the wanted state (`enabled`) and the reported one apart, so "the toggle says on
+# but nothing is listening" is a visible fact (`in_sync: false`) instead of a silent lie.
+_WAKE: Dict[str, Any] = {"enabled": False, "phrase": "", "engine": "", "listening": False,
+                         "last_heard": "", "state": "", "probe": "", "app": "",
+                         "uptime_s": 0, "at": 0.0, "reported_at": 0.0, "error": ""}
+
+
+def _wake_path() -> str:
+    return os.path.join(_hermes(), "jarvis", "wake.json")
+
+
+def _load_wake() -> None:
+    try:
+        with open(_wake_path(), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:  # noqa: BLE001
+        return
+    if isinstance(data, dict):
+        with _LOCK:
+            _WAKE.update({k: v for k, v in data.items() if k in _WAKE})
+
+
+def _save_wake() -> None:
+    try:
+        path = _wake_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with _LOCK:
+            payload = dict(_WAKE)
+        with open(path + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False)
+        os.replace(path + ".tmp", path)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def wake_state() -> Dict[str, Any]:
+    """`{enabled, phrase, engine, listening, last_heard}` plus the honest extras."""
+    cfg = config()
+    with _LOCK:
+        wake = dict(_WAKE)
+    phrase = str(cfg.get("wake_phrase") or wake.get("phrase") or "هی جارویس")
+    reported = float(wake.get("reported_at") or 0)
+    stale = bool(reported) and (_now() - reported) > 120
+    return {"enabled": bool(wake.get("enabled")),
+            "phrase": phrase,
+            "engine": str(wake.get("engine") or ""),
+            "listening": bool(wake.get("listening")) and not stale,
+            "last_heard": str(wake.get("last_heard") or ""),
+            "state": str(wake.get("state") or ""),
+            "in_sync": bool(wake.get("enabled")) == bool(wake.get("listening"))
+                       and not stale,
+            "stale": stale,
+            "app": str(wake.get("app") or ""),
+            "uptime_s": int(wake.get("uptime_s") or 0),
+            "at": wake.get("at") or 0,
+            "reported_at": wake.get("reported_at") or 0,
+            "probe": str(wake.get("probe") or ""),
+            "error": redact(str(wake.get("error") or "")),
+            "on_device_only": True}
+
+
+def wake_update(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge one update. `reported_at` only moves when the app is the one talking."""
+    now = _now()
+    patch: Dict[str, Any] = {}
+    for key in ("enabled", "listening", "last_heard", "state", "engine", "probe", "app",
+                "uptime_s", "phrase", "error"):
+        if key in body:
+            patch[key] = body[key]
+    if "enabled" in patch:
+        patch["enabled"] = bool(patch["enabled"])
+    if "listening" in patch:
+        patch["listening"] = bool(patch["listening"])
+    if isinstance(patch.get("uptime_s"), (int, float)):
+        patch["uptime_s"] = int(patch["uptime_s"])
+    with _LOCK:
+        _WAKE.update(patch)
+        _WAKE["at"] = now
+        # The app pushes `app`; a curl from the panel does not, and must not fake "listening".
+        if patch.get("app"):
+            _WAKE["reported_at"] = now
+        if not patch.get("app") and "listening" not in patch:
+            _WAKE["listening"] = False
+    _save_wake()
+    return wake_state()
+
+
 def status() -> Dict[str, Any]:
     """Last measured numbers, cached -- never a probe, because the app polls this."""
     cfg = config()
@@ -1076,6 +1182,7 @@ def register(app, ctx) -> None:
     global _CTX
     _CTX = dict(ctx or {})
     _load_stats()
+    _load_wake()
     paths = {getattr(route, "path", "") for route in getattr(app, "routes", [])}
     if "/voice/status" in paths:
         return                                    # already registered (double import)
@@ -1203,6 +1310,24 @@ def register(app, ctx) -> None:
     @app.get("/voice/status")
     def voice_status():
         return status()
+
+    @app.get("/voice/wake")
+    def wake_get():
+        return wake_state()
+
+    @app.post("/voice/wake")
+    async def wake_post(request: Request):
+        """The app pushes what it is really doing; a panel or curl may push a wish."""
+        try:
+            raw = await request.body()
+            body = json.loads(raw) if raw else {}
+        except Exception:  # noqa: BLE001
+            body = {}
+        if not isinstance(body, dict):
+            return err("bad_body", "expected a JSON object")
+        if "phrase" in body and not str(body.get("phrase") or "").strip():
+            return err("bad_phrase", "phrase is empty")
+        return wake_update(body)
 
     @app.post("/voice/probe")
     async def voice_probe():
