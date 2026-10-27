@@ -121,11 +121,15 @@ def bridge(intent: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
     if intent == "clipboard" and "text" not in args:
         if not str(res.get("text") or "").strip():
-            # The app answered `ok` with an empty clipboard. That is Android's background
-            # read rule, not an empty clipboard (measured: the same is true of
-            # termux-clipboard-get). Do NOT report success — let the shell lane try, and if
-            # it is empty too the intent tells the truth (`clipboard_unreadable`).
-            return None
+            # Empty is only an answer when the focused read *looked*: `diag` is what Clip.java
+            # saw (hasPrimaryClip / itemCount / MIME), so "has=false" really means the clipboard
+            # is empty, while "timeout" means the activity never answered and the shell lanes
+            # should try. Measured 2026-10-27: a clip set by Termux comes back in 54 ms.
+            diag = str(res.get("diag") or "")
+            if "timeout" in diag or "has=" not in diag:
+                return None
+            return {"ok": True, "intent": intent, "source": "bridge", "text": "",
+                    "detail": "کلیپ‌بورد خالی است", "empty": True, "diag": diag}
     out = {"ok": True, "intent": intent, "source": "bridge"}
     if intent == "ui":
         out["detail"] = res.get("text", "")
@@ -516,10 +520,11 @@ def clipboard(args: Dict[str, Any]) -> Dict[str, Any]:
     """Set, or read, the clipboard — and never answer a silent empty string.
 
     Android 10+ lets only the *focused* app (or the default IME) read the clipboard, and the
-    Termux process is never that app. Measured on this phone: `setPrimaryClip` through the
-    accessibility service works, but every read — the bridge's `clipboard_get` **and**
-    `termux-clipboard-get` — comes back empty, even with the shade as the focused window.
-    So a read that yields nothing is reported as `clipboard_unreadable`, not as «(خالی)».
+    Termux process is never that app, so `termux-clipboard-get` always comes back empty. The
+    real read is the bridge's `clipboard_focus` (Clip.java takes focus for one frame) and it
+    answers in ~54 ms; this function is only the fallback for when that activity did not run.
+    Reaching the empty branch below therefore means the console app was not up, not that the
+    clipboard is empty — the bridge lane owns that verdict now.
     """
     started = time.time()
     if "text" in args:
@@ -535,11 +540,11 @@ def clipboard(args: Dict[str, Any]) -> Dict[str, Any]:
                     error="clipboard_unreadable")
     if not text:
         return _err("clipboard_get", started,
-                    "کلیپ‌بورد در پس‌زمینه خوانده نمی‌شود: اندروید ۱۰+ خواندن را فقط به اپ "
-                    "فعال یا کیبورد پیش‌فرض می‌دهد (هر دو مسیر برگشتند خالی). متن را از "
-                    "اپ فعال بخوان یا با «type» بنویس.",
+                    "اپ جارویس جواب نداد، و ترمکس از پس‌زمینه کلیپ‌بورد را نمی‌خواند "
+                    "(اندروید ۱۰+ فقط اپ فعال یا کیبورد پیش‌فرض). یک بار اپ جارویس را باز "
+                    "کن و دوباره بخواه.",
                     source="termux-api", error="clipboard_unreadable",
-                    paths_tried=["bridge:clipboard_get", "termux-clipboard-get"])
+                    paths_tried=["bridge:clipboard_focus", "termux-clipboard-get"])
     return _ok("clipboard_get", started, text[:300], text=text, source="termux-api",
                verified=True)
 
@@ -754,7 +759,23 @@ _ROUTE_SIMPLE = [
      "ui", {}, "چه روی صفحه است"),
     (re.compile(r"^(?:فضای|حافظه)\s*(?:ذخیره|خالی)?$|^storage$", re.I),
      "info", {"what": "storage"}, "فضای ذخیره"),
+    (re.compile(r"^(?:متن[\s\u200c]+)?(?:کلیپ[\s\u200c]*بورد|clipboard)[\s\u200c]*"
+                r"(?:رو|را|و)?[\s\u200c]*"
+                r"(?:بخون|بخونش|بخوان|نشون[\s\u200c]*بده|ببین|چیه|چیست)?$", re.I),
+     "clipboard", {}, "کلیپ‌بورد"),
 ]
+# Persian writes ZWNJ inside «کلیپ‌بورد»; `\s*` does not cover it, so every pattern above and
+# below allows both. A clipboard *write* carries a payload, and Persian can put it either side
+# of the verb («این متن رو تو کلیپ‌بورد بذار» vs «تو کلیپ‌بورد بذار: این متن»), so there are two
+# shapes; the read pattern above wins first, and a read never has a verb, so they cannot clash.
+_CLIP_SET_BEFORE = re.compile(
+    r"^(?:متن\s+)?(?:این\s+)?(?P<a>.+?)[\s\u200c]+(?:رو|را)[\s\u200c]+(?:تو|در|به)[\s\u200c]+"
+    r"(?:کلیپ[\s\u200c]*بورد|clipboard)[\s\u200c]+(?:بذار|بگذار|کپی[\s\u200c]*کن)$"
+    r"|^copy[\s\u200c]+(?P<b>.+)$", re.I)
+_CLIP_SET_AFTER = re.compile(
+    r"^(?:.*?)(?:کلیپ[\s\u200c]*بورد|clipboard)[\s\u200c]*(?:رو|را)?[\s\u200c]*"
+    r"(?:تو|در|به)?[\s\u200c]*(?:بذار|بگذار|کپی[\s\u200c]*کن)[\s\u200c]*[:：]?[\s\u200c]*"
+    r"(?P<c>.+)$", re.I)
 _BRIGHTNESS = re.compile(r"^(?:روشنایی|نور\s+صفحه)\s*(?:رو)?\s*(\d{1,3})\s*(?:درصد|٪)?", re.I)
 
 
@@ -770,6 +791,13 @@ def route(text: str) -> Optional[Dict[str, Any]]:
     if m:
         return {"intent": "brightness", "args": {"percent": int(m.group(1))},
                 "label": "روشنایی " + m.group(1) + "٪"}
+    for pattern, groups in ((_CLIP_SET_BEFORE, ("a", "b")), (_CLIP_SET_AFTER, ("c",))):
+        m = pattern.match(t)
+        if m:
+            payload = next((m.group(g) for g in groups if m.group(g)), "").strip(" «»\"'")
+            if payload:
+                return {"intent": "clipboard", "args": {"text": payload},
+                        "label": "کپی در کلیپ‌بورد"}
     for pattern in _APP_PATTERNS:
         m = pattern.match(t)
         if m:

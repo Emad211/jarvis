@@ -54,6 +54,15 @@ One repo for both halves of the system. Background history: `../hermes-handoff/H
 - gwctl v3 API is documented in its docstring; most endpoints take `?profile=`.
 - Device control goes through Shizuku `rish` (uid 2000, not root). The `phone-*` helpers source
   `phone-env`, which sets `RISH_APPLICATION_ID=com.termux`.
+- The app's own bridge (`Bridge.java`, `127.0.0.1:8791`) is tried **before** adb/rish for every
+  intent it has, and it needs neither Shizuku nor wireless debugging — only the accessibility
+  service for the intents that inject gestures. `docs/jarvis-bridge.md` is the intent table.
+- The clipboard is readable only by the focused app on Android 10+, so reads go through
+  `clipboard_focus` → `Clip.java`, a translucent no-animation activity that takes focus for one
+  frame. Measured 2026-10-27 with a clip written by Termux (a different UID): 54 ms for the read,
+  167 ms for the whole `jarvis-fast clipboard` call, and «کلیپ‌بورد رو بخون» answers from the fast
+  lane. `clipboard_get` (accessibility) and `termux-clipboard-get` are *structurally* empty from
+  the background — do not try to fix those two again.
 - Models: primary **River AI** `deepseek-ai/DeepSeek-V4.1-Flash-1017` (measured 1.1 s for a tiny
   chat through a working VPN exit; it is also the model the builder of this project runs on).
   `POST /providers/autoselect` probes every provider with a real request and makes the first

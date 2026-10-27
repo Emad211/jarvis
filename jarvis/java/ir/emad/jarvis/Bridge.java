@@ -266,13 +266,23 @@ final class Bridge {
                             | android.content.Intent.FLAG_ACTIVITY_NO_ANIMATION
                             | android.content.Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
                     i.putExtra(Clip.TOKEN, token);
+                    String seed = args.optString("seed", "");
+                    if (!seed.isEmpty()) {
+                        // diagnostic only: let the activity put text on the clipboard itself, so
+                        // the read path can be tested without accessibility or another app
+                        i.putExtra(Clip.SEED, seed);
+                    }
                     activity.startActivity(i);
                     String text = "";
-                    long deadline = System.currentTimeMillis() + 2500;
+                    String diag = "timeout";
+                    long deadline = System.currentTimeMillis() + 3000;
                     while (System.currentTimeMillis() < deadline) {
                         String seen = readSmall(Clip.token(activity));
-                        if (seen.startsWith(token + ":")) {
+                        if (seen.startsWith(token + "|")) {
                             text = readSmall(Clip.outFile(activity));
+                            // token|<ts>|<diag...>
+                            int second = seen.indexOf('|', token.length() + 1);
+                            diag = second > 0 ? seen.substring(second + 1) : seen;
                             break;
                         }
                         try {
@@ -284,6 +294,7 @@ final class Bridge {
                     }
                     out.put("ok", true);
                     out.put("text", text);
+                    out.put("diag", diag);
                     break;
                 }
                 case "clipboard_set": {
