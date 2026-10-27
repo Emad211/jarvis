@@ -62,6 +62,13 @@ sys.path.insert(0, APP)
 sys.path.insert(0, os.path.join(HOME, ".local", "bin"))
 os.chdir(HOME)
 
+# Hermes only asks before a flagged command when it believes a human can answer; its test is
+# `HERMES_EXEC_ASK` (or a gateway context). Without this the guard falls into its
+# "non-interactive" branch and **auto-approves** — measured 2026-10-27: `rm -rf ~/approval-test`
+# ran and deleted the folder with no prompt at all. The console always has a human on the other
+# end (the approval card answers `POST /ask/<id>`), so this process has to say so.
+os.environ.setdefault("HERMES_EXEC_ASK", "1")
+
 import jarvis_fast as fast  # noqa: E402  (deterministic device actions, no model)
 
 VERSION = "0.1"
@@ -536,6 +543,61 @@ def answer_ask(ask_id: str, value: str) -> bool:
     return False
 
 
+def bind_approvals(session: Session) -> None:
+    """Route Hermes' blocking approval queue to the console's approval card.
+
+    The turn thread is blocked inside `tools/approval.py` until somebody resolves the entry, and
+    the console is that somebody: the `ask` event becomes the approval card and `POST /ask/<id>`
+    resolves it. Two measured facts shaped this (2026-10-27):
+      - with `approvals.mode: smart` a guardian model auto-approved `rm -rf` even with a human
+        present, so the phone runs `manual`;
+      - `manual` alone only returned `status: pending_approval` to the model and nothing ever ran
+        (not even after approval) because it wants a decision loop — the notify callback IS that
+        loop. The ask itself runs on its own thread: resolving takes the same lock the waiter
+        holds while calling us.
+    """
+    try:
+        from tools import approval as approvals
+    except Exception as exc:  # noqa: BLE001
+        log("approval bridge unavailable: %s" % exc)
+        return
+
+    # The guard reads `get_current_session_key()` (default "default"), so the key has to be set
+    # in *this* thread — the contextvar is per-thread — and every registration below uses the
+    # same value. One key per session also keeps two conversations from answering each other's
+    # approval.
+    key = "jv-" + session.id
+    try:
+        approvals.set_current_session_key(key)
+    except Exception as exc:  # noqa: BLE001
+        log("approval session key failed: %s" % exc)
+
+    def notify(data: Dict[str, Any]) -> None:
+        threading.Thread(target=settle, args=(dict(data),), name="approve-" + session.id,
+                         daemon=True).start()
+
+    def settle(data: Dict[str, Any]) -> None:
+        command = str(data.get("command") or "")
+        answer = ask(session, "approval",
+                     {"command": _short(command, 1500),
+                      "description": _short(data.get("description") or "flagged command", 300),
+                      "request_id": data.get("request_id")},
+                     timeout=int(load_config().get("approvals", {}).get("timeout") or 300))
+        allow = str(answer).strip().lower() in ("allow", "approve", "yes", "true", "1")
+        try:
+            approvals.resolve_gateway_approval(
+                key, "approve" if allow else "deny",
+                reason=None if allow else "کاربر رد کرد",
+                request_id=data.get("request_id"))
+        except Exception as exc:  # noqa: BLE001
+            log("approval resolve failed: %s" % exc)
+
+    try:
+        approvals.register_gateway_notify(key, notify)
+    except Exception as exc:  # noqa: BLE001
+        log("approval notify failed: %s" % exc)
+
+
 def _progress(session: Session, kind: str, name=None, preview=None, args=None,
               state: Optional[Dict[str, Any]] = None) -> None:
     session.emit("tool.progress", {"kind": str(kind), "name": _short(name, 80),
@@ -609,6 +671,10 @@ def _run_turn_inner(session: Session, text: str) -> None:
         else:
             approval = _approval_for(session, model, reasoning)
         set_approval_callback(approval)
+        # The blocking queue in tools/approval.py needs a listener, not just a callback:
+        # without it a flagged command is returned to the model as `pending_approval` and
+        # never runs, even after the user approves it.
+        bind_approvals(session)
         agent = session.agent
         agent.stream_delta_callback = wrap_delta
         agent.tool_progress_callback = (

@@ -1,5 +1,13 @@
 _config_version: 39
 approvals:
+  # The console always has a human on the other end: the approval card answers POST /ask/<id>
+  # and jarvisd registers the notify callback that unblocks the guard. smart let a guardian
+  # model auto-approve rm -rf even though a person was available (measured 2026-10-27); the
+  # non-interactive contexts keep their own stricter modes.
+  mode: manual
+  timeout: 300
+  cron_mode: deny
+  single_query_mode: deny
   destructive_slash_confirm: false
 auxiliary:
   free_only: true

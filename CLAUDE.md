@@ -63,6 +63,15 @@ One repo for both halves of the system. Background history: `../hermes-handoff/H
   167 ms for the whole `jarvis-fast clipboard` call, and «کلیپ‌بورد رو بخون» answers from the fast
   lane. `clipboard_get` (accessibility) and `termux-clipboard-get` are *structurally* empty from
   the background — do not try to fix those two again.
+- **Approvals are live, and they took three things to be live** (measured 2026-10-27, deny and
+  allow both verified on `rm -rf`): `HERMES_EXEC_ASK=1` in the daemon's env (Hermes otherwise
+  treats the process as non-interactive and *auto-approves*), `approvals.mode: manual`
+  (`smart` let a guardian model approve `rm -rf` with a human available), and
+  `register_gateway_notify` per session in `bind_approvals()` — with only the env and the mode,
+  the guard hands the model a `pending_approval` result and the command never runs, not even
+  after the user approves. The queue key is `get_current_session_key()`, set per session to
+  `jv-<sid>` in the turn thread. Deny answers `BLOCKED: Command denied` and the file survives;
+  allow runs it. Approval asks block the turn up to `approvals.timeout` (300 s) and fail closed.
 - Models: primary **River AI** `deepseek-ai/DeepSeek-V4.1-Flash-1017` (measured 1.1 s for a tiny
   chat through a working VPN exit; it is also the model the builder of this project runs on).
   `POST /providers/autoselect` probes every provider with a real request and makes the first
